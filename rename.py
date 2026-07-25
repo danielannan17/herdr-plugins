@@ -517,16 +517,6 @@ def run_check() -> int:
     return 0
 
 
-def run_configure() -> int:
-    path = config_dir() / "provider.env"
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text((Path(__file__).parent / "provider.env.example").read_text())
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    subprocess.run([*editor.split(), str(path)], check=False)
-    return 0
-
-
 def run_reset(pane_id: str) -> int:
     herdr("agent", "rename", pane_id, "--clear")
     stamp_path(pane_id).unlink(missing_ok=True)
@@ -586,8 +576,6 @@ def main() -> int:
     flags = set(sys.argv[1:])
     if "--check" in flags:
         return run_check()
-    if "--configure" in flags:
-        return run_configure()
 
     pane_id, event = pane_from_environment()
     if not pane_id:

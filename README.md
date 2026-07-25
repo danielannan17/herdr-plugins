@@ -34,7 +34,8 @@ herdr plugin action invoke configure-ai --plugin chrismalone.agent-smart-rename
 herdr plugin action invoke check-ai     --plugin chrismalone.agent-smart-rename
 ```
 
-`configure-ai` opens `provider.env` in `$EDITOR`:
+`configure-ai` opens `provider.env` in `$VISUAL`/`$EDITOR` inside a herdr overlay
+pane — an action's own subprocess has no terminal for an editor to draw on:
 
 ```
 OPENAI_API_KEY=sk-...

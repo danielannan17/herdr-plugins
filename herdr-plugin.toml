@@ -19,11 +19,19 @@ command = ["uv", "run", "--script", "rename.py"]
 on = "pane.exited"
 command = ["uv", "run", "--script", "rename.py"]
 
+# An editor needs a real terminal, which a plugin only gets inside a pane —
+# action commands run as background subprocesses with captured output.
+[[panes]]
+id = "editor"
+title = "Provider credentials"
+placement = "overlay"
+command = ["bash", "edit-provider.sh"]
+
 [[actions]]
 id = "configure-ai"
 title = "Edit provider credentials"
 contexts = ["workspace"]
-command = ["uv", "run", "--script", "rename.py", "--configure"]
+command = ["bash", "open-configure.sh"]
 
 [[actions]]
 id = "check-ai"
