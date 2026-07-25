@@ -36,6 +36,8 @@ read off a source checkout:
 | Claude publishes a usable OSC title | `✳ Scrape and organize tweets from X account` |
 | Codex does not | title is the branch name, `main` |
 | Sidebar is 26 columns and ellipsizes | `sidebar_width` default 26; rows use `truncate_end` |
+| **Names must match `^[a-z][a-z0-9_-]{0,31}$`** | probed the validator: `scrape-tweets` and `review_auth_flow` accepted; `Scrape-Tweets`, `2fast`, `-leading-dash` and 33 chars all rejected with `invalid_agent_name` |
+| **`agent read` returns raw stdout, not JSON** | every other call returns a JSON envelope; `agent read --format text` returns the pane text directly |
 
 Two constraints that follow from 0.7.5's release notes and were designed around:
 agent names must be unique across the session, and they are cleared when the
@@ -137,24 +139,33 @@ Pane content goes to a third-party API, so this is applied to every payload:
   `xoxb-/xoxp-/xoxa-/xoxr-…`, `Bearer <token>`, `-----BEGIN … KEY-----` blocks,
   and `key=value` / `key: value` where the key contains `token`, `secret`,
   `password`, `passwd`, `api_key`, or `apikey`
-- long unbroken high-entropy runs (≥32 chars of base64/hex alphabet) redacted
-- payload capped at 4000 characters, keeping the tail (most recent output)
+- long unbroken high-entropy runs (≥40 chars of base64 alphabet) redacted
+- the recent-output section capped at 4000 characters, keeping the tail, since
+  that is the only unbounded part; the header lines add a little on top
 
 Redaction replaces the value with `[redacted]`, never the surrounding text, so
 the model still sees the shape of the work.
 
 ### Output constraints
 
-- 2 to 4 words
-- at most 24 characters — the sidebar is 26 columns and ellipsizes
-- Title Case, acronyms preserved
-- describes the task, not the tool or the model: `Scrape Tweets`, never
-  `Claude Session`
-- single line, no punctuation beyond internal hyphens
+An agent name doubles as a herdr CLI target, so herdr enforces
+`^[a-z][a-z0-9_-]{0,31}$`. Names are therefore kebab-case slugs, not prose:
 
-A name failing any constraint is discarded rather than written. The prompt lives
-in `naming-prompt.md`, copied into the plugin config dir on first run so it can
-be tuned without editing code.
+- 2 to 4 hyphen-separated words
+- at most 24 characters, not the 32 herdr permits — the sidebar is 26 columns
+  and ellipsizes
+- describes the task, not the tool or the model: `scrape-tweets`, never
+  `claude-session`
+- must start with a letter
+
+Model output is **slugified rather than discarded** when it arrives in prose:
+`Add CSV Export` becomes `add-csv-export`. This keeps the plugin working when
+the model ignores the format instruction, which matters because a discarded
+name means an agent stays unnamed. A slug that still fails the word-count,
+length, or agent-label checks after slugification is discarded.
+
+The prompt lives in `naming-prompt.md`, copied into the plugin config dir on
+first run so it can be tuned without editing code.
 
 ## Provider contract
 
@@ -214,9 +225,9 @@ lock is not an error — the run exits 0 and the next firing picks it up.
 ### Collisions
 
 Agent names must be unique session-wide. On `agent_name_taken`, retry once with
-the workspace label as a prefix (`pipette Scrape Tweets`), then with a numeric
-suffix (`Scrape Tweets 2`), truncating to stay within 24 characters. If all
-attempts collide, exit 0 without renaming.
+the workspace slug as a prefix (`pipette-scrape-tweets`), then with a numeric
+suffix (`scrape-tweets-3`), truncating to stay within 24 characters and to keep
+matching herdr's name rule. If all attempts collide, exit 0 without renaming.
 
 ## Failure handling
 
@@ -241,8 +252,10 @@ the most recent 200 lines on each run, and are visible via
 - evidence selection across the three routes and the too-thin case
 - sanitisation: each secret pattern, home-path rewriting, cap behaviour
 - title normalisation and hash stability across spinner and timer ticks
-- name validation: word count, length, casing, rejection cases
-- collision disambiguation and its 24-character truncation
+- name validation: slugification of prose output, word count, length, rejections,
+  and that every accepted name matches herdr's own `^[a-z][a-z0-9_-]{0,31}$`
+- collision disambiguation, its 24-character truncation, and that every
+  disambiguated candidate also matches herdr's rule
 - the stamp state machine: fresh, unchanged, materially changed, manual,
   replaced session, within floor
 

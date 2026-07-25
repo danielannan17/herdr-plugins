@@ -1,0 +1,44 @@
+id = "chrismalone.agent-smart-rename"
+name = "Agent Smart Rename"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Names each agent session from what it is actually doing"
+platforms = ["linux", "macos"]
+
+# Naming needs evidence, and a freshly detected agent has none yet — the script
+# exits quietly when the evidence is thin and tries again on the next firing.
+[[events]]
+on = "pane.agent_detected"
+command = ["uv", "run", "--script", "rename.py"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["uv", "run", "--script", "rename.py"]
+
+[[events]]
+on = "pane.exited"
+command = ["uv", "run", "--script", "rename.py"]
+
+[[actions]]
+id = "configure-ai"
+title = "Edit provider credentials"
+contexts = ["workspace"]
+command = ["uv", "run", "--script", "rename.py", "--configure"]
+
+[[actions]]
+id = "check-ai"
+title = "Validate naming configuration"
+contexts = ["workspace"]
+command = ["uv", "run", "--script", "rename.py", "--check"]
+
+[[actions]]
+id = "rename-now"
+title = "Rename focused agent now"
+contexts = ["workspace", "pane"]
+command = ["uv", "run", "--script", "rename.py", "--now"]
+
+[[actions]]
+id = "reset-agent"
+title = "Clear focused agent's name"
+contexts = ["workspace", "pane"]
+command = ["uv", "run", "--script", "rename.py", "--reset"]
