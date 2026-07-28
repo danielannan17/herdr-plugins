@@ -18,7 +18,8 @@ from rename import (  # noqa: E402
     strip_agent_banner,
     title_hash,
     title_is_junk,
-    validate_name,
+    name_for,
+    validate_label,
 )
 
 HOME = "/Users/cm"
@@ -150,50 +151,49 @@ def test_banner_only_output_is_thin():
     )
 
 
-# --- name validation ---------------------------------------------------------
+# --- label validation --------------------------------------------------------
 
-def test_a_slug_passes_unchanged():
-    assert validate_name("scrape-tweets") == "scrape-tweets"
-
-
-def test_title_cased_model_output_is_slugified_rather_than_discarded():
-    assert validate_name("Scrape Tweets") == "scrape-tweets"
-    assert validate_name("Add CSV Export") == "add-csv-export"
-    assert validate_name("  Review Auth Flow  ") == "review-auth-flow"
+def test_an_imperative_phrase_passes():
+    assert validate_label("Dedupe eval results") == "Dedupe eval results"
 
 
-def test_every_accepted_name_satisfies_herdrs_own_rule():
-    for raw in ["Scrape Tweets", "fix upsert ordering", "Add CSV Export", "debug-flaky-tests"]:
-        name = validate_name(raw)
-        assert name is not None
-        assert HERDR_NAME_RULE.match(name), name
+def test_first_word_is_capitalised_and_acronyms_survive():
+    assert validate_label("fix CSV export") == "Fix CSV export"
+    assert validate_label("  review auth flow  ") == "Review auth flow"
+
+
+def test_the_26_character_limit_is_hard():
+    assert validate_label("Mark nonreasoning models") == "Mark nonreasoning models"
+    assert len("Mark nonreasoning models") == 24
+    assert validate_label("Deduplicate the evaluation results") is None
+
+
+def test_wrong_word_counts_are_rejected():
+    assert validate_label("Dedupe") is None
+    assert validate_label("a b c d e f") is None
+
+
+def test_labels_that_name_the_tool_are_rejected():
+    assert validate_label("Run Claude session") is None
+    assert validate_label("Codex agent work") is None
+
+
+def test_junk_shapes_are_rejected():
+    assert validate_label("") is None
+    assert validate_label(None) is None
+    assert validate_label("2 fast 2 furious") is None
+
+
+def test_a_label_yields_a_valid_cli_alias():
+    for label in ["Dedupe eval results", "Fix CSV export", "Mark nonreasoning models"]:
+        alias = name_for(label)
+        assert alias is not None
+        assert HERDR_NAME_RULE.match(alias), alias
 
 
 def test_slugify_strips_leading_non_letters_because_names_must_start_with_one():
     assert slugify("2 Fast 2 Furious") == "fast-2-furious"
     assert slugify("--Weird--Input--") == "weird-input"
-
-
-def test_wrong_word_counts_are_rejected():
-    assert validate_name("debug") is None
-    assert validate_name("one two three four five") is None
-
-
-def test_overlong_names_are_rejected():
-    assert validate_name("migrate every vault key") == "migrate-every-vault-key"
-    assert validate_name("reticulating splines everywhere") is None
-
-
-def test_names_that_name_the_tool_are_rejected():
-    assert validate_name("Claude Session") is None
-    assert validate_name("codex-agent") is None
-
-
-def test_junk_shapes_are_rejected():
-    assert validate_name("") is None
-    assert validate_name(None) is None
-    assert validate_name("investigating… 🙂") is None
-    assert validate_name("!!!") is None
 
 
 # --- collision disambiguation ------------------------------------------------
@@ -205,14 +205,14 @@ def test_first_attempt_prefixes_the_workspace_as_a_slug():
 def test_later_attempts_use_a_numeric_suffix_within_the_length_cap():
     result = disambiguate("migrate-every-vault-key", "pipette data", 2)
     assert result.endswith("-3")
-    assert len(result) <= 24
+    assert len(result) <= 32
 
 
 def test_every_disambiguation_still_satisfies_herdrs_rule():
     for attempt in (1, 2, 3):
         for workspace in ("pipette data", "measurement backend", ""):
             candidate = disambiguate("migrate-every-vault-key", workspace, attempt)
-            assert len(candidate) <= 24, candidate
+            assert len(candidate) <= 32, candidate
             assert HERDR_NAME_RULE.match(candidate), candidate
 
 
@@ -244,7 +244,7 @@ SESSION = "66087717-d7aa-4ced-a43e-850d3a1cc51f"
 
 def stamp(**overrides):
     base = dict(
-        name_set="scrape-tweets",
+        label_set="Scrape tweets", name_set="scrape-tweets",
         title_hash=title_hash("✳ Scrape and organize tweets"),
         agent_session_id=SESSION,
         set_at=NOW - 600,
@@ -259,20 +259,20 @@ def test_no_stamp_means_rename():
 
 
 def test_manual_stamp_is_never_touched():
-    assert decide(stamp(manual=True), "my-name", SESSION, "other", NOW) == "skip-manual"
+    assert decide(stamp(manual=True), "My name", SESSION, "other", NOW) == "skip-manual"
 
 
 def test_a_hand_rename_is_adopted_as_manual():
-    assert decide(stamp(), "hand-picked", SESSION, "other", NOW) == "adopt-manual"
+    assert decide(stamp(), "Hand picked", SESSION, "other", NOW) == "adopt-manual"
 
 
 def test_unchanged_title_is_skipped():
     existing = stamp()
-    assert decide(existing, "scrape-tweets", SESSION, existing.title_hash, NOW) == "skip-unchanged"
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW) == "skip-unchanged"
 
 
 def test_materially_changed_title_triggers_a_rename():
-    assert decide(stamp(), "scrape-tweets", SESSION, "different-hash", NOW) == "rename"
+    assert decide(stamp(), "Scrape tweets", SESSION, "different-hash", NOW) == "rename"
 
 
 def test_a_replacement_agent_in_the_same_pane_is_renamed():
@@ -288,4 +288,4 @@ def test_the_rename_floor_is_respected():
 
 
 def test_force_overrides_every_skip():
-    assert decide(stamp(manual=True), "my-name", SESSION, "same", NOW, force=True) == "rename"
+    assert decide(stamp(manual=True), "My name", SESSION, "same", NOW, force=True) == "rename"

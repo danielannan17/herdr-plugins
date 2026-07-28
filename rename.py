@@ -24,11 +24,15 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, ValidationError
 
-# herdr enforces ^[a-z][a-z0-9_-]{0,31}$ on agent names, because a name doubles
-# as a CLI target. 24 rather than 32 so the 26-column sidebar does not ellipsize.
-MAX_NAME_CHARS = 24
-MIN_NAME_WORDS = 2
-MAX_NAME_WORDS = 4
+# What the sidebar shows: an imperative English phrase on one 26-column row,
+# written to the pane label, which takes arbitrary text.
+MAX_LABEL_CHARS = 26
+MIN_LABEL_WORDS = 2
+MAX_LABEL_WORDS = 5
+
+# What the CLI targets: herdr enforces ^[a-z][a-z0-9_-]{0,31}$ on agent names,
+# so the same phrase is slugified into an alias you can `herdr agent send` to.
+MAX_NAME_CHARS = 32
 RENAME_FLOOR_SECONDS = 60
 STALE_LOCK_SECONDS = 120
 EVIDENCE_CHAR_CAP = 4000
@@ -76,6 +80,7 @@ class Config(BaseModel):
 
 
 class Stamp(BaseModel):
+    label_set: str | None = None
     name_set: str | None = None
     title_hash: str = ""
     agent_session_id: str | None = None
@@ -180,23 +185,29 @@ def slugify(text: str) -> str:
     return re.sub(r"^[^a-z]+", "", slug)
 
 
-def validate_name(raw: str | None) -> str | None:
-    """Return a name herdr will accept and the sidebar can show whole, or None to abstain."""
+def validate_label(raw: str | None) -> str | None:
+    """Return an imperative phrase that fits one sidebar row, or None to abstain."""
     if not raw:
         return None
-    slug = slugify(raw)
-    if not slug or len(slug) > MAX_NAME_CHARS:
+    label = " ".join(raw.strip().strip("\"'").split())
+    if not label or len(label) > MAX_LABEL_CHARS or not label[:1].isalpha():
         return None
-    words = slug.split("-")
-    if not MIN_NAME_WORDS <= len(words) <= MAX_NAME_WORDS:
+    words = label.split()
+    if not MIN_LABEL_WORDS <= len(words) <= MAX_LABEL_WORDS:
         return None
-    if slug in AGENT_LABELS or any(word in AGENT_LABELS for word in words):
+    if any(word.lower().strip(".,:;") in AGENT_LABELS for word in words):
         return None
-    return slug if HERDR_NAME_RULE.match(slug) else None
+    return label[0].upper() + label[1:]
+
+
+def name_for(label: str) -> str | None:
+    """Slugify a label into the CLI alias herdr will accept, or None if it cannot be one."""
+    slug = slugify(label)[:MAX_NAME_CHARS].strip("-")
+    return slug if slug and HERDR_NAME_RULE.match(slug) else None
 
 
 def disambiguate(name: str, workspace_label: str, attempt: int) -> str:
-    """Produce an alternative when a name is already taken elsewhere in the session."""
+    """Produce an alternative slug when one is already taken elsewhere in the session."""
     if attempt == 1 and workspace_label:
         prefix = slugify(workspace_label).split("-")[0]
         if prefix:
@@ -207,7 +218,7 @@ def disambiguate(name: str, workspace_label: str, attempt: int) -> str:
 
 def decide(
     stamp: Stamp | None,
-    live_name: str | None,
+    live_label: str | None,
     live_session_id: str | None,
     current_title_hash: str,
     now: int,
@@ -222,9 +233,9 @@ def decide(
         return "skip-manual"
     if stamp.agent_session_id != live_session_id:
         return "rename"
-    if live_name and live_name != stamp.name_set:
+    if live_label and live_label != stamp.label_set:
         return "adopt-manual"
-    if live_name and stamp.title_hash == current_title_hash:
+    if live_label and stamp.title_hash == current_title_hash:
         return "skip-unchanged"
     if now - stamp.set_at < RENAME_FLOOR_SECONDS:
         return "skip-floor"
@@ -382,16 +393,38 @@ def load_config() -> Config | None:
 
 
 def load_prompt() -> str:
-    """Return the naming prompt, seeding the config dir copy on first run."""
+    """Return the naming prompt, refreshing the config dir copy unless it was edited.
+
+    A plugin upgrade ships a new prompt, so an unmodified copy must follow it or
+    the upgrade silently does nothing. A copy the user has touched is left alone.
+    """
+    shipped = (Path(__file__).parent / "naming-prompt.md").read_text()
     user_copy = config_dir() / "naming-prompt.md"
-    shipped = Path(__file__).parent / "naming-prompt.md"
-    if not user_copy.exists():
-        try:
+    seen = config_dir() / ".naming-prompt.shipped.sha256"
+    current = sha256(shipped.encode()).hexdigest()
+    try:
+        if not user_copy.exists():
             user_copy.parent.mkdir(parents=True, exist_ok=True)
-            user_copy.write_text(shipped.read_text())
-        except OSError:
-            return shipped.read_text()
-    return user_copy.read_text()
+            user_copy.write_text(shipped)
+            seen.write_text(current)
+            return shipped
+        previous = seen.read_text().strip() if seen.exists() else ""
+        unmodified = sha256(user_copy.read_text().encode()).hexdigest() == previous
+        if previous != current:
+            if unmodified or not previous:
+                # No recorded hash means we cannot tell an edited copy from a
+                # stale one, so keep a backup before taking the shipped version.
+                if not previous:
+                    user_copy.with_suffix(".md.bak").write_text(user_copy.read_text())
+                user_copy.write_text(shipped)
+                seen.write_text(current)
+                log("naming prompt updated from the shipped version")
+                return shipped
+            seen.write_text(current)
+            log("shipped naming prompt changed; keeping your edited copy")
+        return user_copy.read_text()
+    except OSError:
+        return shipped
 
 
 def request_name(config: Config, prompt: str, evidence_block: str) -> str | None:
@@ -444,16 +477,28 @@ def gather_evidence(pane_id: str) -> tuple[Evidence, dict] | None:
     return evidence, agent_info
 
 
-def apply_name(pane_id: str, name: str, workspace_label: str) -> str | None:
-    """Write the name, working around session-wide uniqueness. Returns the name that stuck."""
+def apply_label(pane_id: str, label: str, workspace_label: str) -> str | None:
+    """Write the sidebar label, plus a slug alias for CLI targeting.
+
+    The label is the deliverable; the alias is best effort, since agent names are
+    unique session-wide and may collide. Returns the label that stuck.
+    """
+    slug = name_for(label)
     for attempt in range(3):
-        candidate = name if attempt == 0 else disambiguate(name, workspace_label, attempt)
+        if slug is None:
+            break
+        candidate = slug if attempt == 0 else disambiguate(slug, workspace_label, attempt)
         result = herdr("agent", "rename", pane_id, candidate)
         if result and "error" not in result:
-            return candidate
+            break
         if result and "agent_name_taken" not in str(result.get("error", "")):
-            log(f"rename {pane_id} failed: {str(result.get('error'))[:160]}")
-            return None
+            log(f"alias for {pane_id} rejected: {str(result.get('error'))[:120]}")
+            break
+
+    result = herdr("pane", "rename", pane_id, label)
+    if result and "error" not in result:
+        return label
+    log(f"label for {pane_id} failed: {str((result or {}).get('error'))[:160]}")
     return None
 
 
@@ -519,8 +564,9 @@ def run_check() -> int:
 
 def run_reset(pane_id: str) -> int:
     herdr("agent", "rename", pane_id, "--clear")
+    herdr("pane", "rename", pane_id, "")
     stamp_path(pane_id).unlink(missing_ok=True)
-    log(f"{pane_id} name cleared by action")
+    log(f"{pane_id} label cleared by action")
     return 0
 
 
@@ -530,17 +576,18 @@ def rename_pane(pane_id: str, force: bool) -> int:
     if gathered is None:
         return 0
     evidence, agent_info = gathered
-    live_name = agent_info.get("name")
+    live_label = ((herdr("pane", "get", pane_id) or {}).get("pane") or {}).get("label")
     session = (agent_info.get("agent_session") or {}).get("value")
     stamp = read_stamp(pane_id)
-    verdict = decide(stamp, live_name, session, title_hash(evidence.title), now, force)
+    verdict = decide(stamp, live_label, session, title_hash(evidence.title), now, force)
 
     if verdict == "adopt-manual":
         write_stamp(pane_id, Stamp(
-            name_set=live_name, title_hash=title_hash(evidence.title),
+            label_set=live_label, name_set=agent_info.get("name"),
+            title_hash=title_hash(evidence.title),
             agent_session_id=session, set_at=now, manual=True,
         ))
-        log(f"{pane_id} adopted manual name {live_name!r}")
+        log(f"{pane_id} adopted manual label {live_label!r}")
         return 0
     if verdict != "rename":
         return 0
@@ -554,19 +601,20 @@ def rename_pane(pane_id: str, force: bool) -> int:
         if config is None:
             log("no OPENAI_API_KEY — run the configure-ai action")
             return 0
-        proposed = validate_name(
+        proposed = validate_label(
             request_name(config, load_prompt(), render_evidence(evidence, str(Path.home())))
         )
         if proposed is None:
             return 0
-        applied = apply_name(pane_id, proposed, evidence.workspace_label)
+        applied = apply_label(pane_id, proposed, evidence.workspace_label)
         if applied is None:
             return 0
         write_stamp(pane_id, Stamp(
-            name_set=applied, title_hash=title_hash(evidence.title),
+            label_set=applied, name_set=name_for(applied),
+            title_hash=title_hash(evidence.title),
             agent_session_id=session, set_at=now, manual=False,
         ))
-        log(f"{pane_id} renamed to {applied!r}")
+        log(f"{pane_id} labelled {applied!r}")
     finally:
         release_lock(pane_id)
     return 0
