@@ -44,6 +44,9 @@ SMART_RENAME_BASE_URL=https://api.openai.com/v1
 SMART_RENAME_TIMEOUT_MS=20000
 ```
 
+`watch.sh` reads its interval from the environment rather than this file, since it
+never loads the provider config: set `SMART_RENAME_POLL_SECONDS` to override 60.
+
 `check-ai` prints what it can see and never spends a model call:
 
 ```
@@ -95,16 +98,30 @@ description = "rename this agent"
 ## How it decides
 
 Hooks on `pane.agent_detected`, `pane.agent_status_changed` and `pane.exited`
-run a short-lived script — there is no daemon to start, supervise, or restart.
+run a short-lived script.
+
+herdr fires those events around the moment an agent starts and then goes quiet —
+measured at 7 dispatches in 89 minutes across 10 live agents, every one of them a
+pane starting up. A fresh agent has nothing to go on yet, so a plugin that only
+answered those events would spend each pane's one chance on an empty screen. That
+is why `pane.agent_detected` also starts `watch.sh`, one `sh` loop per pane that
+polls every 60 seconds and exits when the agent goes away. It is a watcher, so it
+is a process you can see in `ps` — about 2MB each, against roughly 42MB if the
+Python script did the waiting itself.
 
 Evidence comes from the agent's OSC terminal title first, because it is free and
 already per-agent. Claude publishes a task summary there; codex publishes its
 branch name, which is useless, so the plugin falls back to reading recent pane
-output. A fresh agent with neither is left alone until it has done something.
+output.
 
-An agent is named once and then renamed only when its title changes materially —
-spinner glyphs, elapsed timers, and token counters are stripped before comparing,
-so routine ticking triggers nothing.
+An agent is renamed when either signal says the work moved on:
+
+- **Its title changes materially.** Spinner glyphs, elapsed timers and token
+  counters are stripped before comparing, so routine ticking triggers nothing.
+- **Its context grows by 100k tokens.** A long session drifts onto new work while
+  its title stays stale, so the plugin takes a fresh look each 100k. The count is
+  read from the Claude session transcript, which is the only place it exists —
+  agents that keep no transcript never trip this and rely on the title alone.
 
 **Rename an agent by hand and the plugin never touches it again.** It notices
 that the live name is not the one it wrote and marks the agent as yours.
@@ -126,13 +143,20 @@ assignments, and long high-entropy strings replaced with `[redacted]`.
 That is a real reduction in exposure, not a guarantee. If a pane holds something
 that must never reach a third party, don't run this plugin against it.
 
+The Claude session transcript is opened only to read the token count off its last
+usage record. Nothing from it is sent anywhere.
+
 ## Failure behaviour
 
 Every failure path exits 0 and stays quiet — a naming plugin has no business
 breaking your multiplexer. No API key, a provider timeout, a junk reply, an
-unreachable socket, a corrupt stamp, a concurrent run: all are no-ops that
-retry on the next firing. Diagnostics land in the plugin state dir's
-`rename.log` and in `herdr plugin log list --plugin chrismalone.agent-smart-rename`.
+unreachable socket, a corrupt stamp, a concurrent run: all are no-ops.
+
+Every run records why it stopped, because a firing may not come again and a
+silent no-op is indistinguishable from a broken plugin. Diagnostics land in the
+plugin state dir's `rename.log`, which is appended to and rotated so overlapping
+runs cannot lose each other's lines, and in
+`herdr plugin log list --plugin chrismalone.agent-smart-rename`.
 
 ## Development
 

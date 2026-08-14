@@ -287,5 +287,23 @@ def test_the_rename_floor_is_respected():
     assert decide(stamp(set_at=NOW - 5), None, SESSION, "new-hash", NOW) == "skip-floor"
 
 
+def test_context_growth_past_the_step_triggers_a_rename():
+    existing = stamp(tokens_at_naming=120_000)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=220_000) == "rename"
+
+
+def test_context_growth_short_of_the_step_does_not():
+    existing = stamp(tokens_at_naming=120_000)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=219_999) == "skip-unchanged"
+
+
+def test_a_stamp_with_no_baseline_never_triggers_on_tokens():
+    existing = stamp(tokens_at_naming=None)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=900_000) == "skip-unchanged"
+
+
 def test_force_overrides_every_skip():
     assert decide(stamp(manual=True), "My name", SESSION, "same", NOW, force=True) == "rename"

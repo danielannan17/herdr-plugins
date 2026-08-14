@@ -5,11 +5,15 @@ min_herdr_version = "0.7.5"
 description = "Names each agent session from what it is actually doing"
 platforms = ["linux", "macos"]
 
-# Naming needs evidence, and a freshly detected agent has none yet — the script
-# exits quietly when the evidence is thin and tries again on the next firing.
+# A freshly detected agent has no evidence yet, so this first try usually abstains.
 [[events]]
 on = "pane.agent_detected"
 command = ["uv", "run", "--script", "rename.py"]
+
+# herdr stops firing once a pane settles, so the watcher carries the retries.
+[[events]]
+on = "pane.agent_detected"
+command = ["sh", "watch.sh"]
 
 [[events]]
 on = "pane.agent_status_changed"

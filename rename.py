@@ -35,10 +35,17 @@ MAX_LABEL_WORDS = 5
 MAX_NAME_CHARS = 32
 RENAME_FLOOR_SECONDS = 60
 STALE_LOCK_SECONDS = 120
+
+# A long session drifts onto new work while its title goes stale.
+RENAME_TOKEN_STEP = 100_000
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+TRANSCRIPT_TAIL_BYTES = 400_000
+USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
 EVIDENCE_CHAR_CAP = 4000
 MIN_OUTPUT_CHARS = 40
 RECENT_OUTPUT_LINES = 120
-LOG_LINE_CAP = 200
+LOG_BYTE_CAP = 64_000
 
 AGENT_LABELS = {
     "claude", "codex", "cursor", "copilot", "devin", "droid", "kilo", "kimi",
@@ -86,6 +93,7 @@ class Stamp(BaseModel):
     agent_session_id: str | None = None
     set_at: int = 0
     manual: bool = False
+    tokens_at_naming: int | None = None
 
 
 class Evidence(BaseModel):
@@ -223,6 +231,7 @@ def decide(
     current_title_hash: str,
     now: int,
     force: bool = False,
+    tokens: int | None = None,
 ) -> str:
     """Verdict for one pane: rename, adopt-manual, skip-manual, skip-unchanged or skip-floor."""
     if force:
@@ -235,6 +244,13 @@ def decide(
         return "rename"
     if live_label and live_label != stamp.label_set:
         return "adopt-manual"
+    # A stamp written before this pane had a baseline must not read as 100k behind.
+    if (
+        tokens is not None
+        and stamp.tokens_at_naming is not None
+        and tokens - stamp.tokens_at_naming >= RENAME_TOKEN_STEP
+    ):
+        return "rename"
     if live_label and stamp.title_hash == current_title_hash:
         return "skip-unchanged"
     if now - stamp.set_at < RENAME_FLOOR_SECONDS:
@@ -271,13 +287,17 @@ def config_dir() -> Path:
 
 
 def log(message: str) -> None:
-    """Append a diagnostic line, trimming the log to its most recent lines."""
+    """Append a diagnostic line, rotating the file once it passes its size cap.
+
+    Runs overlap, so this appends rather than rewriting and losing their lines.
+    """
     path = state_dir() / "rename.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        previous = path.read_text().splitlines() if path.exists() else []
-        previous.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}")
-        path.write_text("\n".join(previous[-LOG_LINE_CAP:]) + "\n")
+        if path.exists() and path.stat().st_size > LOG_BYTE_CAP:
+            path.replace(path.with_name(path.name + ".1"))
+        with path.open("a") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
     except OSError:
         pass
 
@@ -302,9 +322,13 @@ def write_stamp(pane_id: str, stamp: Stamp) -> None:
         log(f"stamp write failed for {pane_id}: {error}")
 
 
+def lock_path(pane_id: str) -> Path:
+    return state_dir() / "locks" / f"{pane_id.replace(':', '-')}.lock"
+
+
 def acquire_lock(pane_id: str, now: int) -> bool:
     """Take a per-pane lock so concurrent firings cannot both call the model."""
-    path = state_dir() / "locks" / f"{pane_id.replace(':', '-')}.lock"
+    path = lock_path(pane_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and now - int(path.stat().st_mtime) > STALE_LOCK_SECONDS:
@@ -319,7 +343,7 @@ def acquire_lock(pane_id: str, now: int) -> bool:
 
 
 def release_lock(pane_id: str) -> None:
-    (state_dir() / "locks" / f"{pane_id.replace(':', '-')}.lock").unlink(missing_ok=True)
+    lock_path(pane_id).unlink(missing_ok=True)
 
 
 def herdr_raw(*args: str) -> str | None:
@@ -367,6 +391,33 @@ def git_branch(cwd: str) -> str | None:
         return None
     branch = completed.stdout.strip()
     return branch if completed.returncode == 0 and branch else None
+
+
+def context_tokens(session_id: str | None) -> int | None:
+    """Size of a Claude session's context, or None when there is no transcript.
+
+    herdr publishes no token counts, so this reads the transcript the agent wrote.
+    """
+    if not session_id:
+        return None
+    transcripts = list(CLAUDE_PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
+    if not transcripts:
+        return None
+    try:
+        size = transcripts[0].stat().st_size
+        with transcripts[0].open("rb") as handle:
+            handle.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            usage = (json.loads(line).get("message") or {}).get("usage")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if usage:
+            return sum(usage.get(field, 0) for field in USAGE_FIELDS)
+    return None
 
 
 def load_config() -> Config | None:
@@ -447,7 +498,11 @@ def request_name(config: Config, prompt: str, evidence_block: str) -> str | None
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
         log(f"model request failed: {type(error).__name__}: {str(error)[:160]}")
         return None
-    return extract_name(content)
+    extracted = extract_name(content)
+    if extracted is None:
+        # Quoted because abstention and an unparseable reply look identical here.
+        log(f"model named nothing: {' '.join(content.split())[:160]}")
+    return extracted
 
 
 def gather_evidence(pane_id: str) -> tuple[Evidence, dict] | None:
@@ -574,12 +629,14 @@ def rename_pane(pane_id: str, force: bool) -> int:
     now = int(time.time())
     gathered = gather_evidence(pane_id)
     if gathered is None:
+        log(f"{pane_id} hosts no agent")
         return 0
     evidence, agent_info = gathered
     live_label = ((herdr("pane", "get", pane_id) or {}).get("pane") or {}).get("label")
     session = (agent_info.get("agent_session") or {}).get("value")
     stamp = read_stamp(pane_id)
-    verdict = decide(stamp, live_label, session, title_hash(evidence.title), now, force)
+    tokens = context_tokens(session)
+    verdict = decide(stamp, live_label, session, title_hash(evidence.title), now, force, tokens)
 
     if verdict == "adopt-manual":
         write_stamp(pane_id, Stamp(
@@ -590,10 +647,15 @@ def rename_pane(pane_id: str, force: bool) -> int:
         log(f"{pane_id} adopted manual label {live_label!r}")
         return 0
     if verdict != "rename":
+        # The watcher polls every minute, so the steady state would drown the log.
+        if verdict != "skip-unchanged":
+            log(f"{pane_id} {verdict}")
         return 0
     if evidence_is_thin(evidence):
+        log(f"{pane_id} shows no task yet, title={evidence.title!r}")
         return 0
     if not acquire_lock(pane_id, now):
+        log(f"{pane_id} another run holds the lock")
         return 0
 
     try:
@@ -601,10 +663,11 @@ def rename_pane(pane_id: str, force: bool) -> int:
         if config is None:
             log("no OPENAI_API_KEY — run the configure-ai action")
             return 0
-        proposed = validate_label(
-            request_name(config, load_prompt(), render_evidence(evidence, str(Path.home())))
-        )
+        raw_name = request_name(config, load_prompt(), render_evidence(evidence, str(Path.home())))
+        proposed = validate_label(raw_name)
         if proposed is None:
+            if raw_name:
+                log(f"{pane_id} discarded {raw_name!r}, which is not a valid label")
             return 0
         applied = apply_label(pane_id, proposed, evidence.workspace_label)
         if applied is None:
@@ -613,6 +676,7 @@ def rename_pane(pane_id: str, force: bool) -> int:
             label_set=applied, name_set=name_for(applied),
             title_hash=title_hash(evidence.title),
             agent_session_id=session, set_at=now, manual=False,
+            tokens_at_naming=tokens,
         ))
         log(f"{pane_id} labelled {applied!r}")
     finally:
