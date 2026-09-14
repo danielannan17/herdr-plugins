@@ -161,8 +161,9 @@ fn flow(head: &str, items: &[String], width: usize) -> Vec<String> {
 /// sidebar collapsed that includes the spaces and agents themselves, flowed
 /// into as many lines as `width` needs.
 pub fn hud_lines(m: &Model, typed: &str, width: usize) -> Vec<String> {
-    let mut header =
-        format!("{TITLE}{BOLD}easyjump{RESET} {DIM}hjkl/HL/JK move · ⏎ keep · esc undo · ` back{RESET}");
+    let mut header = format!(
+        "{TITLE}{BOLD}easyjump{RESET} {DIM}hjkl/HL/JK move · ⏎ keep · esc undo · ` back{RESET}"
+    );
     if !typed.is_empty() {
         header.push_str(&format!("  {HINT_TYPED} {typed} {RESET}"));
     }

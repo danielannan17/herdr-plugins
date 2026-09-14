@@ -23,7 +23,8 @@ quitting, so they never appear in a label.
 
 ## Requirements
 
-- Herdr 0.8.2 or newer (plugin popup placement, metadata tokens)
+- Herdr 0.8.2 or newer (plugin popup placement, metadata tokens); 0.9.0 is
+  supported, see the notes on spaces/tabs and the sidebar below.
 - A Rust toolchain (`cargo`); `herdr plugin install` runs
   `cargo build --release`. Four small dependencies: serde, serde_json, libc,
   unicode-width. No TUI framework.
@@ -110,15 +111,21 @@ Press `prefix+f`.
   number and that digit is the key. The HUD repeats the pane and tab hints.
 - With the sidebar collapsed to its icon rail the labels have nowhere to go,
   so the HUD also lists every space and agent, wrapped to the popup width.
-  Herdr does not report the sidebar state; the plugin infers it from where
-  the pane area starts (`EASYJUMP_SIDEBAR=collapsed|expanded` overrides the
-  guess for debugging).
+  Herdr does not report the sidebar state. Herdr 0.8 lets the plugin infer
+  it from where the pane area starts; Herdr 0.9 reports pane-relative
+  coordinates, so the sidebar is assumed to be expanded there. Set
+  `EASYJUMP_SIDEBAR=collapsed` (in the popup's environment, e.g. via
+  `plugin.pane.open --env`) to get the full HUD with a collapsed rail, or
+  `expanded` to force the other way.
 - With two-letter labels, typing the first letter hides every label that no
   longer matches, in the sidebar and in the HUD.
 - `h` `j` `k` `l` move focus to the neighbouring pane, `H` / `L` switch to
   the previous / next tab, `J` / `K` to the next / previous space, all
-  without closing the popup. Labels and the HUD follow the new focus, so you
-  can mix relative moves and label jumps.
+  without losing the popup. Labels and the HUD follow the new focus, so you
+  can mix relative moves and label jumps. (Since Herdr 0.9 a popup belongs
+  to the tab it was opened on and is only drawn there, so `H` `L` `J` `K`
+  close the popup and reopen it on the target tab, about 15 ms later, with
+  the typed prefix and the origin carried over.)
 - `` ` `` (backtick) jumps back to where you were when the popup opened,
   even after a chain of relative moves.
 - `Enter` keeps the current focus and closes (after relative moves this is

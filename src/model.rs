@@ -281,9 +281,14 @@ impl Model {
             .find(|l| Some(&l.tab_id) == current_tab.as_ref())
             .cloned();
         let probe = layout.as_ref().or(snap.layouts.first());
+        // Herdr 0.8 reports the pane area in outer-terminal coordinates, so
+        // `area.x` is the sidebar's width (33 expanded, 4 collapsed rail).
+        // Herdr 0.9 renders the sidebar in the client and reports the pane
+        // area relative to itself: `x` is always 0 and says nothing about
+        // the sidebar, so treat 0 as unknown and assume it is expanded.
         let (sidebar_cols, screen_cols, screen_rows) = match probe {
             Some(l) => (
-                l.area.x,
+                if l.area.x > 0 { l.area.x } else { -1 },
                 (l.area.x + l.area.width).max(0) as usize,
                 (l.area.y + l.area.height).max(0) as usize,
             ),
@@ -562,7 +567,9 @@ impl Model {
             .iter()
             .filter(|t| {
                 auto_tab_key(t).is_none()
-                    && self.label_index.contains_key(&(Kind::Tab, t.tab_id.clone()))
+                    && self
+                        .label_index
+                        .contains_key(&(Kind::Tab, t.tab_id.clone()))
             })
             .collect()
     }
@@ -591,9 +598,9 @@ impl Model {
         }
         for p in &self.tab_panes {
             let label = self.label(Kind::Pane, &p.pane_id);
-            let entry = pane_params.entry(p.pane_id.clone()).or_insert_with(|| {
-                json!({ "pane_id": p.pane_id, "source": SOURCE, "ttl_ms": TOKEN_TTL_MS })
-            });
+            let entry = pane_params.entry(p.pane_id.clone()).or_insert_with(
+                || json!({ "pane_id": p.pane_id, "source": SOURCE, "ttl_ms": TOKEN_TTL_MS }),
+            );
             if label.starts_with(typed) {
                 entry["title"] = json!(format!("[{label}] {}", self.border_text(&p.pane_id)));
             } else {
@@ -637,7 +644,10 @@ impl Model {
             );
         }
         for t in self.renamed_tabs() {
-            let _ = client.call("tab.rename", json!({ "tab_id": t.tab_id, "label": t.label }));
+            let _ = client.call(
+                "tab.rename",
+                json!({ "tab_id": t.tab_id, "label": t.label }),
+            );
         }
     }
 
@@ -664,5 +674,4 @@ impl Model {
             }
         }
     }
-
 }
