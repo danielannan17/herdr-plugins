@@ -48,11 +48,15 @@ COMPACTION_MIN_DROP = 50_000
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 TRANSCRIPT_TAIL_BYTES = 400_000
+# Reading for messages and titles stops at the message counts below or at this many bytes.
+TRANSCRIPT_SCAN_CAP_BYTES = 8_000_000
+TRANSCRIPT_CHUNK_BYTES = 256_000
 USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
-EVIDENCE_CHAR_CAP = 4000
-USER_MESSAGE_COUNT = 5
-USER_MESSAGE_CHAR_CAP = 300
+EVIDENCE_CHAR_CAP = 6000
+FIRST_MESSAGE_COUNT = 5
+LATEST_MESSAGE_COUNT = 15
+USER_MESSAGE_CHAR_CAP = 200
 LOG_BYTE_CAP = 64_000
 
 AGENT_LABELS = {
@@ -144,7 +148,10 @@ class Evidence(BaseModel):
     cwd: str
     branch: str | None
     title: str | None
-    user_messages: list[str] = []
+    custom_title: str | None = None
+    ai_title: str | None = None
+    first_messages: list[str] = []
+    latest_messages: list[str] = []
 
 
 class NameResponse(BaseModel):
@@ -220,7 +227,15 @@ def fallback_label(title: str | None) -> str | None:
 def evidence_is_thin(evidence: Evidence) -> bool:
     if evidence.title and not title_is_junk(evidence.title, evidence.cwd, evidence.branch):
         return False
-    return not evidence.user_messages
+    return not (
+        evidence.custom_title or evidence.ai_title or evidence.first_messages or evidence.latest_messages
+    )
+
+
+def message_lines(messages: list[str], home: str) -> str:
+    return "\n".join(
+        "- " + redact(" ".join(message.split()), home)[:USER_MESSAGE_CHAR_CAP] for message in messages
+    )
 
 
 def render_evidence(evidence: Evidence, home: str) -> str:
@@ -232,14 +247,22 @@ def render_evidence(evidence: Evidence, home: str) -> str:
     ]
     if evidence.branch:
         parts.append(f"branch: {evidence.branch}")
+    if evidence.custom_title:
+        parts.append(f"session title, set by the user: {redact(evidence.custom_title, home)}")
+    if evidence.ai_title:
+        parts.append(f"session title, auto-generated: {redact(evidence.ai_title, home)}")
     if evidence.title and not title_is_junk(evidence.title, evidence.cwd, evidence.branch):
-        parts.append(f"title: {redact(evidence.title, home)}")
-    if evidence.user_messages:
-        lines = [
-            "- " + redact(" ".join(message.split()), home)[:USER_MESSAGE_CHAR_CAP]
-            for message in evidence.user_messages
-        ]
-        parts.append("the user's last messages, oldest first:\n" + cap_tail("\n".join(lines)))
+        parts.append(f"terminal title: {redact(evidence.title, home)}")
+    if evidence.first_messages:
+        parts.append(
+            "the user's first messages (how the session started):\n"
+            + message_lines(evidence.first_messages, home)
+        )
+    if evidence.latest_messages:
+        parts.append(
+            "the user's latest messages, oldest first:\n"
+            + cap_tail(message_lines(evidence.latest_messages, home), EVIDENCE_CHAR_CAP)
+        )
     return "\n".join(parts)
 
 
@@ -485,16 +508,21 @@ def resolve_session(agent_info: dict) -> str | None:
     return candidates[0]["sessionId"] if len(candidates) == 1 else None
 
 
+def transcript_path(session_id: str | None) -> Path | None:
+    if not session_id:
+        return None
+    transcripts = list(CLAUDE_PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
+    return transcripts[0] if transcripts else None
+
+
 def transcript_tail_lines(session_id: str | None) -> list[str]:
     """The last lines of a Claude session's transcript, oldest first; empty when there is none."""
-    if not session_id:
-        return []
-    transcripts = list(CLAUDE_PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
-    if not transcripts:
+    path = transcript_path(session_id)
+    if not path:
         return []
     try:
-        size = transcripts[0].stat().st_size
-        with transcripts[0].open("rb") as handle:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
             handle.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
             return handle.read().decode("utf-8", "replace").splitlines()
     except OSError:
@@ -544,24 +572,101 @@ def last_compaction(session_id: str | None) -> float | None:
     return None
 
 
-def recent_user_messages(session_id: str | None) -> list[str]:
-    """The last messages the user typed in a Claude session, oldest first; empty when there is no transcript."""
-    messages = []
-    for line in transcript_tail_lines(session_id):
-        entry = parse_entry(line)
-        if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
-            continue
-        message = entry.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, list):
-            content = "\n".join(
-                block.get("text") or "" for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-        text = content.strip() if isinstance(content, str) else ""
-        if text and not NON_TYPED_MESSAGE.match(text):
+def stripped(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def typed_message(entry: dict) -> str:
+    """What the user typed in a transcript record, or "" when the record is not a typed message."""
+    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
+        return ""
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        content = "\n".join(
+            block.get("text") or "" for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    text = stripped(content)
+    return "" if NON_TYPED_MESSAGE.match(text) else text
+
+
+def title_records(entry: dict) -> dict[str, str]:
+    """The session title a transcript record carries, keyed "ai_title" or "custom_title"."""
+    fields = {"ai-title": ("ai_title", "aiTitle"), "custom-title": ("custom_title", "customTitle")}
+    key, field = fields.get(entry.get("type"), (None, None))
+    title = stripped(entry.get(field)) if key else ""
+    return {key: title} if title else {}
+
+
+def scan_transcript_head(handle) -> tuple[list[str], dict[str, str], int]:
+    """The first typed messages and the titles seen on the way, and the offset the scan stopped at."""
+    messages: list[str] = []
+    titles: dict[str, str] = {}
+    offset = 0
+    for line in handle:
+        offset += len(line)
+        entry = parse_entry(line.decode("utf-8", "replace"))
+        titles.update(title_records(entry))
+        text = typed_message(entry)
+        if text:
             messages.append(text)
-    return messages[-USER_MESSAGE_COUNT:]
+        if len(messages) >= FIRST_MESSAGE_COUNT or offset >= TRANSCRIPT_SCAN_CAP_BYTES:
+            break
+    return messages, titles, offset
+
+
+def scan_transcript_tail(handle, size: int, floor: int) -> tuple[list[str], dict[str, str]]:
+    """The latest typed messages, oldest first, and the latest titles, reading backwards from the end.
+
+    Stops at `floor`, which is always a line boundary, so nothing the head scan took is read again.
+    """
+    found: list[str] = []
+    titles: dict[str, str] = {}
+    position = size
+    carry = b""
+    while position > floor and len(found) < LATEST_MESSAGE_COUNT and size - position < TRANSCRIPT_SCAN_CAP_BYTES:
+        start = max(floor, position - TRANSCRIPT_CHUNK_BYTES)
+        handle.seek(start)
+        lines = (handle.read(position - start) + carry).split(b"\n")
+        position = start
+        # Unless the chunk starts at a line boundary its first line is only the end of a record.
+        carry = lines.pop(0) if start > floor else b""
+        for line in reversed(lines):
+            entry = parse_entry(line.decode("utf-8", "replace"))
+            for key, title in title_records(entry).items():
+                titles.setdefault(key, title)
+            text = typed_message(entry)
+            if text:
+                found.append(text)
+    return found[:LATEST_MESSAGE_COUNT][::-1], titles
+
+
+def session_history(session_id: str | None) -> dict:
+    """What a Claude session's transcript says about its goal.
+
+    The first typed messages come from the start of the file and the latest ones and the session titles
+    from its end. The transcript is mostly tool output, so both reads go by message count, not bytes.
+    """
+    history: dict = {"ai_title": None, "custom_title": None, "first_messages": [], "latest_messages": []}
+    path = transcript_path(session_id)
+    if not path:
+        return history
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            first, head_titles, head_end = scan_transcript_head(handle)
+            latest, tail_titles = scan_transcript_tail(handle, size, head_end)
+    except OSError:
+        return history
+    titles = {**head_titles, **tail_titles}
+    history.update(
+        ai_title=titles.get("ai_title"),
+        custom_title=titles.get("custom_title"),
+        first_messages=first,
+        latest_messages=latest,
+    )
+    return history
 
 
 def read_settings() -> dict[str, str]:
@@ -1013,7 +1118,7 @@ def request_real_label(
     pane_id: str, evidence: Evidence, session: str | None, tokens: int | None, now: int
 ) -> str:
     """Try for a model-generated label: "applied", "failed", or "busy" when another run holds the lock."""
-    evidence = evidence.model_copy(update={"user_messages": recent_user_messages(session)})
+    evidence = evidence.model_copy(update=session_history(session))
     if evidence_is_thin(evidence):
         log(f"{pane_id} shows no task yet, title={evidence.title!r}")
         return "failed"

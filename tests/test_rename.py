@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import rename  # noqa: E402
 from rename import (  # noqa: E402
     HERDR_NAME_RULE,
     Evidence,
@@ -130,25 +131,80 @@ def test_a_good_title_alone_is_enough_evidence():
     assert not evidence_is_thin(evidence(title="✳ Evaluate upserting to BigQuery warehouse"))
 
 
-def test_junk_title_with_no_user_messages_is_thin():
+def test_junk_title_with_no_messages_is_thin():
     assert evidence_is_thin(evidence(title="main"))
 
 
 def test_junk_title_with_a_user_message_is_not_thin():
-    assert not evidence_is_thin(evidence(title="main", user_messages=["fix the upsert ordering"]))
+    assert not evidence_is_thin(evidence(title="main", latest_messages=["fix the upsert ordering"]))
 
 
-def test_no_title_and_no_user_messages_is_thin():
+def test_no_title_and_no_messages_is_thin():
     assert evidence_is_thin(evidence(title=None))
 
 
-def test_user_messages_are_rendered_redacted_and_capped():
+def test_a_session_title_alone_is_enough_evidence():
+    assert not evidence_is_thin(evidence(title="main", ai_title="Claude Code random scrolling bug"))
+    assert not evidence_is_thin(evidence(title="main", custom_title="Herdr tab plugin"))
+
+
+def test_messages_are_rendered_redacted_and_capped():
     rendered = render_evidence(
-        evidence(user_messages=["look at /Users/cm/dev/app", "word " * 100, "line one\n   line two"]), HOME
+        evidence(latest_messages=["look at /Users/cm/dev/app", "word " * 100, "line one\n   line two"]), HOME
     )
     assert "- look at ~/dev/app" in rendered
-    assert "- " + ("word " * 100)[:300] + "\n" in rendered
+    assert "- " + ("word " * 100)[:200] + "\n" in rendered
     assert "- line one line two" in rendered
+
+
+def test_first_and_latest_messages_are_separate_labelled_blocks():
+    rendered = render_evidence(evidence(first_messages=["opening request"], latest_messages=["latest step"]), HOME)
+    first, latest = rendered.index("first messages (how the session started):\n- opening request"), rendered.index(
+        "latest messages, oldest first:\n- latest step"
+    )
+    assert first < latest
+
+
+def test_session_titles_come_before_the_terminal_title_and_are_redacted():
+    rendered = render_evidence(
+        evidence(
+            title="✳ Evaluate upserting to BigQuery",
+            ai_title="Claude Code scrolling bug in /Users/cm/dev",
+            custom_title="Herdr tab plugin",
+            first_messages=["opening request"],
+        ),
+        HOME,
+    )
+    custom = rendered.index("session title, set by the user: Herdr tab plugin")
+    auto = rendered.index("session title, auto-generated: Claude Code scrolling bug in ~/dev")
+    terminal = rendered.index("terminal title: ✳ Evaluate upserting to BigQuery")
+    assert custom < auto < terminal < rendered.index("first messages")
+
+
+def test_a_full_set_of_messages_fits_the_evidence_cap():
+    first = [f"first {n} " + "x" * 300 for n in range(5)]
+    latest = [f"latest {n} " + "x" * 300 for n in range(15)]
+    rendered = render_evidence(evidence(first_messages=first, latest_messages=latest), HOME)
+    assert all(f"- first {n} " in rendered for n in range(5))
+    assert all(f"- latest {n} " in rendered for n in range(15))
+
+
+def test_the_evidence_cap_cuts_old_latest_messages_never_the_titles(monkeypatch):
+    monkeypatch.setattr(rename, "EVIDENCE_CHAR_CAP", 60)
+    rendered = render_evidence(
+        evidence(
+            ai_title="auto title " * 30,
+            custom_title="custom title " * 30,
+            title="✳ Evaluate upserting to BigQuery",
+            first_messages=["opening request " * 10],
+            latest_messages=[f"step {n} with some words" for n in range(10)],
+        ),
+        HOME,
+    )
+    assert ("auto title " * 30).strip() in rendered and ("custom title " * 30).strip() in rendered
+    assert "terminal title: ✳ Evaluate upserting to BigQuery" in rendered
+    assert ("opening request " * 10).strip() in rendered
+    assert "step 9 " in rendered and "step 0 " not in rendered
 
 
 def test_pane_output_is_not_in_the_evidence():

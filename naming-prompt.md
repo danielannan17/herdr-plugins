@@ -2,9 +2,29 @@ You label a single terminal agent session so a developer scanning a narrow
 sidebar can tell at a glance what it is working on.
 
 You will be given the evidence available for one agent: which agent program it
-is, the workspace it sits in, its working directory and git branch, the terminal
-title it published, and the last few messages the user sent it. Some fields may
-be missing.
+is, the workspace it sits in, its working directory and git branch, and what
+the session is about. That comes from up to five sources, any of which may be
+missing:
+
+- a session title set by the user, with `/rename`
+- a session title the agent generated for itself
+- the terminal title the agent published
+- the first messages the user sent, which is how the session started
+- the latest messages the user sent
+
+Name the session's overall goal, not the step it is on now:
+
+- A session title set by the user is their own name for the session. Base the
+  label on it.
+- Otherwise take the goal from the session title and the first messages.
+- Use the latest messages only to make that goal more specific, or to notice it
+  has genuinely changed because the user moved on to a different task. Never
+  name a step taken along the way. A session that opened with "panes randomly
+  scroll to the top" and whose latest messages are about extracting messages
+  from a transcript is named for the scroll bug (`Fix pane scroll jumps`), not
+  for `Extract user messages`.
+- The terminal title is the weakest source: use it when nothing else says what
+  the session is for.
 
 Reply with exactly one JSON object and nothing else:
 
@@ -49,8 +69,8 @@ Too long — do not do this:
     Deduplicate the evaluation results        33
     Clean up the configuration files          31
 
-If the evidence does not support a specific label — a fresh session, a
-title with no task, messages that are only a greeting — reply with:
+If the evidence does not support a specific label — a fresh session, titles
+with no task, messages that are only a greeting — reply with:
 
 {"name": null, "reason": "insufficient evidence"}
 

@@ -394,9 +394,14 @@ def write_transcript(home, session_id, entries, first_line=None):
     (home.projects / f"{session_id}.jsonl").write_text("\n".join(lines) + "\n")
 
 
+def typed(session_id):
+    history = rename.session_history(session_id)
+    return history["first_messages"] + history["latest_messages"]
+
+
 def test_string_content_is_a_user_message(claude_home):
     write_transcript(claude_home, "s", [user("fix the upsert ordering")])
-    assert rename.recent_user_messages("s") == ["fix the upsert ordering"]
+    assert typed("s") == ["fix the upsert ordering"]
 
 
 def test_only_text_blocks_of_a_block_list_are_kept(claude_home):
@@ -404,7 +409,7 @@ def test_only_text_blocks_of_a_block_list_are_kept(claude_home):
         user([{"type": "text", "text": "  add csv export "}, {"type": "image", "source": {}}]),
         user([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
     ])
-    assert rename.recent_user_messages("s") == ["add csv export"]
+    assert typed("s") == ["add csv export"]
 
 
 def test_meta_and_sidechain_records_are_skipped(claude_home):
@@ -414,7 +419,7 @@ def test_meta_and_sidechain_records_are_skipped(claude_home):
         {"type": "assistant", "message": {"content": "an answer"}},
         user("real request"),
     ])
-    assert rename.recent_user_messages("s") == ["real request"]
+    assert typed("s") == ["real request"]
 
 
 @pytest.mark.parametrize("wrapped", [
@@ -429,27 +434,145 @@ def test_meta_and_sidechain_records_are_skipped(claude_home):
 ])
 def test_wrapped_non_typed_messages_are_dropped(claude_home, wrapped):
     write_transcript(claude_home, "s", [user(wrapped), user("   "), user("typed by hand")])
-    assert rename.recent_user_messages("s") == ["typed by hand"]
+    assert typed("s") == ["typed by hand"]
 
 
 def test_a_message_that_merely_mentions_a_tag_is_kept(claude_home):
     write_transcript(claude_home, "s", [user("why does <command-name> show up in the log?")])
-    assert rename.recent_user_messages("s") == ["why does <command-name> show up in the log?"]
+    assert typed("s") == ["why does <command-name> show up in the log?"]
 
 
 def test_a_cut_first_line_is_skipped(claude_home):
     write_transcript(claude_home, "s", [user("first")], first_line='tId": "x", "message": {"content": "cut off')
-    assert rename.recent_user_messages("s") == ["first"]
+    assert typed("s") == ["first"]
 
 
-def test_only_the_last_five_come_back_oldest_first(claude_home):
-    write_transcript(claude_home, "s", [user(f"message {n}") for n in range(8)])
-    assert rename.recent_user_messages("s") == [f"message {n}" for n in range(3, 8)]
+def test_the_first_five_and_last_fifteen_come_back_oldest_first(claude_home):
+    write_transcript(claude_home, "s", [user(f"message {n}") for n in range(30)])
+    history = rename.session_history("s")
+    assert history["first_messages"] == [f"message {n}" for n in range(5)]
+    assert history["latest_messages"] == [f"message {n}" for n in range(15, 30)]
+
+
+def test_a_short_session_sends_each_message_once(claude_home):
+    write_transcript(claude_home, "s", [user(f"message {n}") for n in range(12)])
+    history = rename.session_history("s")
+    assert history["first_messages"] == [f"message {n}" for n in range(5)]
+    assert history["latest_messages"] == [f"message {n}" for n in range(5, 12)]
+
+
+def filler(kilobytes=50):
+    return {"type": "assistant", "message": {"content": "tool output " * (kilobytes * 1024 // 12)}}
+
+
+def spaced_messages(count, fillers_between):
+    entries = []
+    for n in range(count):
+        entries.append(user(f"message {n:02d}"))
+        entries += [filler() for _ in range(fillers_between)]
+    return entries
+
+
+def test_the_first_five_are_found_however_far_apart_they_are(claude_home):
+    write_transcript(claude_home, "s", spaced_messages(30, fillers_between=6))
+    history = rename.session_history("s")
+    assert history["first_messages"] == [f"message {n:02d}" for n in range(5)]
+    assert history["latest_messages"] == [f"message {n:02d}" for n in range(15, 30)]
+
+
+def test_fifteen_latest_are_found_when_they_span_more_than_the_old_tail_window(claude_home):
+    write_transcript(claude_home, "s", spaced_messages(25, fillers_between=2))
+    messages = [f"message {n:02d}" for n in range(25)]
+    history = rename.session_history("s")
+    assert 15 * 2 * 50 * 1024 > rename.TRANSCRIPT_TAIL_BYTES
+    assert history["first_messages"] == messages[:5]
+    assert history["latest_messages"] == messages[10:]
+
+
+@pytest.mark.parametrize("chunk", [7, 100, 997, 4096])
+def test_records_split_across_read_chunks_are_neither_lost_nor_corrupted(claude_home, monkeypatch, chunk):
+    entries = [{"type": "ai-title", "aiTitle": "Séance title"}]
+    entries += [user(f"message {n:02d} café ☕") for n in range(30)]
+    entries.append({"type": "custom-title", "customTitle": "Naïve plugin"})
+    write_transcript(claude_home, "s", entries)
+    monkeypatch.setattr(rename, "TRANSCRIPT_CHUNK_BYTES", chunk)
+    history = rename.session_history("s")
+    assert history["first_messages"] == [f"message {n:02d} café ☕" for n in range(5)]
+    assert history["latest_messages"] == [f"message {n:02d} café ☕" for n in range(15, 30)]
+    assert history["ai_title"] == "Séance title"
+    assert history["custom_title"] == "Naïve plugin"
+
+
+@pytest.mark.parametrize("count", [0, 3, 5, 6, 12, 20, 21])
+@pytest.mark.parametrize("chunk", [50, 100_000])
+def test_no_message_is_in_both_blocks_where_the_reads_meet(claude_home, monkeypatch, count, chunk):
+    write_transcript(claude_home, "s", [user(f"message {n:02d}") for n in range(count)] + [{"type": "system"}])
+    monkeypatch.setattr(rename, "TRANSCRIPT_CHUNK_BYTES", chunk)
+    history = rename.session_history("s")
+    messages = [f"message {n:02d}" for n in range(count)]
+    assert history["first_messages"] == messages[:5]
+    assert history["latest_messages"] == messages[5:][-15:]
+
+
+def test_a_record_cut_at_the_end_of_the_file_is_ignored(claude_home):
+    path = claude_home.projects / "s.jsonl"
+    path.write_text(json.dumps(user("complete")) + "\n" + json.dumps(user("cut off"))[:-9])
+    assert typed("s") == ["complete"]
+
+
+def test_a_head_scan_that_never_finds_five_messages_stops_at_the_byte_cap(claude_home, monkeypatch):
+    entries = [user("message 00")] + [filler() for _ in range(5)] + [user("message 01")]
+    entries += [e for n in range(2, 12) for e in (filler(), user(f"message {n:02d}"))]
+    write_transcript(claude_home, "s", entries)
+    monkeypatch.setattr(rename, "TRANSCRIPT_SCAN_CAP_BYTES", 100_000)
+    monkeypatch.setattr(rename, "TRANSCRIPT_CHUNK_BYTES", 10_000)
+    history = rename.session_history("s")
+    assert history["first_messages"] == ["message 00"]
+    assert history["latest_messages"][-1] == "message 11"
+    assert 1 <= len(history["latest_messages"]) <= 3
+
+
+def test_the_latest_ai_title_wins(claude_home):
+    write_transcript(claude_home, "s", [
+        {"type": "ai-title", "aiTitle": "First guess"},
+        user("a request"),
+        {"type": "ai-title", "aiTitle": "  Claude Code random scrolling bug "},
+        user("another"),
+    ])
+    history = rename.session_history("s")
+    assert history["ai_title"] == "Claude Code random scrolling bug"
+    assert history["custom_title"] is None
+
+
+def test_the_latest_custom_title_wins(claude_home):
+    write_transcript(claude_home, "s", [
+        {"type": "custom-title", "customTitle": "Old name"},
+        {"type": "custom-title", "customTitle": "Herdr tab plugin"},
+        {"type": "ai-title", "aiTitle": "Something else"},
+    ])
+    assert rename.session_history("s")["custom_title"] == "Herdr tab plugin"
+
+
+def test_titles_are_found_in_the_head_when_the_tail_has_none(claude_home):
+    entries = [{"type": "custom-title", "customTitle": "Herdr tab plugin"}, {"type": "ai-title", "aiTitle": "Early"}]
+    entries += spaced_messages(20, fillers_between=0)
+    write_transcript(claude_home, "s", entries)
+    history = rename.session_history("s")
+    assert history["custom_title"] == "Herdr tab plugin"
+    assert history["ai_title"] == "Early"
+
+
+def test_a_title_in_the_tail_outranks_one_in_the_head(claude_home):
+    entries = [{"type": "ai-title", "aiTitle": "Early"}] + spaced_messages(20, fillers_between=0)
+    entries.append({"type": "ai-title", "aiTitle": "Late"})
+    write_transcript(claude_home, "s", entries)
+    assert rename.session_history("s")["ai_title"] == "Late"
 
 
 def test_no_session_or_transcript_means_no_messages(claude_home):
-    assert rename.recent_user_messages(None) == []
-    assert rename.recent_user_messages("missing") == []
+    assert typed(None) == []
+    assert typed("missing") == []
+    assert rename.session_history("missing")["ai_title"] is None
 
 
 def test_the_model_is_sent_the_users_messages_not_pane_output(claude_home, monkeypatch):
@@ -462,6 +585,21 @@ def test_the_model_is_sent_the_users_messages_not_pane_output(claude_home, monke
     assert rename.request_real_label("w4:p4", evidence, "s", None, 1_000_000) == "failed"
     assert "- fix the upsert ordering" in sent[0]
     assert "recent output" not in sent[0]
+
+
+def test_the_model_is_sent_the_session_titles(claude_home, monkeypatch):
+    write_transcript(claude_home, "s", [
+        {"type": "ai-title", "aiTitle": "Claude Code random scrolling bug"},
+        {"type": "custom-title", "customTitle": "Herdr tab plugin"},
+    ])
+    sent = []
+    monkeypatch.setattr(rename, "load_config", lambda: SimpleNamespace(provider="x"))
+    monkeypatch.setattr(rename, "load_prompt", lambda: "prompt")
+    monkeypatch.setattr(rename, "request_name", lambda config, prompt, text: sent.append(text) or None)
+    evidence = Evidence(agent="claude", workspace_label="app", cwd=CWD, branch=None, title="main")
+    assert rename.request_real_label("w4:p4", evidence, "s", None, 1_000_000) == "failed"
+    assert "Herdr tab plugin" in sent[0]
+    assert "Claude Code random scrolling bug" in sent[0]
 
 
 def test_a_junk_title_and_no_messages_never_reaches_the_model(claude_home, monkeypatch):

@@ -118,16 +118,18 @@ multiplexer, and must never spam its log.
 
 1. **OSC title** — `terminal_title_stripped` from `herdr pane get`. Free, already
    per-agent, and for Claude it is a task summary.
-2. **The user's last messages** — the last five typed messages from the Claude
-   session transcript, sent alongside the title. Pane output is never read:
+2. **The session's goal** — from the Claude session transcript, the title the
+   user set with `/rename` (which outranks everything), Claude Code's own
+   session title, the first five typed messages and the last fifteen, sent
+   alongside the terminal title. Pane output is never read:
    herdr captures history by scrolling the visible pane.
 3. **cwd basename and git branch** — supporting context only, never the whole name.
 
 A title counts as junk when it is empty, equals the cwd basename, equals the git
 branch, or is a bare path. That is what demotes codex's `main` to route 2.
 
-Evidence is "too thin" when there is no usable title *and* there are no user
-messages yet.
+Evidence is "too thin" when there is no usable title *and* there are no session
+titles or user messages yet.
 
 ### Sanitisation, before anything leaves the machine
 

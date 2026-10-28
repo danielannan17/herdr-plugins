@@ -120,7 +120,7 @@ rows = [
 ```
 
 Then `herdr server reload-config`. If `check-ai` reports `titles: 0/N`, this is
-the missing piece and naming will fall back to the user's last messages.
+the missing piece and naming will fall back to the session transcript's titles and your messages.
 
 ## Actions
 
@@ -158,8 +158,8 @@ Python script did the waiting itself.
 
 Evidence comes from the agent's OSC terminal title first, because it is free and
 already per-agent. Claude publishes a task summary there; codex publishes its
-branch name, which is useless, so the plugin adds the last messages you typed to
-a Claude session.
+branch name, which is useless, so the plugin adds a Claude session's own titles
+and the messages you typed to it, which name the session's overall goal.
 
 An agent is renamed when any signal says the work moved on:
 
@@ -208,19 +208,22 @@ if it still shows the plugin's name. `check-ai` never touches tabs.
 
 ## What gets sent, and where
 
-Naming needs context, so **the sanitised terminal title and the last five
-messages you typed to the agent (each cut to 300 characters) are sent to your
-configured provider.** Pane output is never read. Before anything leaves the
-machine the payload has `$HOME` rewritten to `~`, and API keys, GitHub and Slack
-tokens, bearer tokens, private-key blocks, `secret=`/`password=`-style
-assignments, and long high-entropy strings replaced with `[redacted]`.
+Naming needs context, so **the sanitised terminal title, the session's titles
+(the one you set with `/rename` and Claude Code's own summary), and the first
+five and last fifteen messages you typed to the agent (each cut to 200
+characters) are sent to your configured provider.** Pane output is never read.
+Before anything leaves the machine the payload has `$HOME` rewritten to `~`, and
+API keys, GitHub and Slack tokens, bearer tokens, private-key blocks,
+`secret=`/`password=`-style assignments, and long high-entropy strings replaced
+with `[redacted]`.
 
 That is a real reduction in exposure, not a guarantee. If your messages hold something
 that must never reach a third party, don't run this plugin against it.
 
-Your messages come from the Claude session transcript; slash-command echoes,
-shell output, reminders and tool results are left out. The transcript is also
-read for the token count off its last usage record. Agents that keep no Claude
+The titles and your messages come from the Claude session transcript, read from
+its start and its end; slash-command echoes, shell output, reminders and tool
+results are left out. The transcript is also read for the token count off its
+last usage record. Agents that keep no Claude
 transcript are named from the terminal title alone.
 
 ## Failure behaviour
