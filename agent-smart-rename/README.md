@@ -1,5 +1,7 @@
 # Agent Smart Rename — herdr plugin
 
+Forked from [malone-c/herdr-agent-smart-rename](https://github.com/malone-c/herdr-agent-smart-rename).
+
 Names each agent session after the work it is doing, so herdr's agents panel
 reads `scrape-tweets` instead of a column of identical `claude` rows.
 
@@ -30,7 +32,9 @@ names *tabs* on its own; this one names agents and, as described under
 ## Install
 
 ```bash
-herdr plugin link /path/to/herdr-agent-smart-rename
+herdr plugin install danielannan17/herdr-plugins/agent-smart-rename
+# or, from a checkout:
+herdr plugin link /path/to/herdr-plugins/agent-smart-rename
 herdr plugin action invoke configure-ai --plugin chrismalone.agent-smart-rename
 herdr plugin action invoke check-ai     --plugin chrismalone.agent-smart-rename
 ```
