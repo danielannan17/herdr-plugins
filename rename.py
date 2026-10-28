@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -40,7 +41,12 @@ STALE_LOCK_SECONDS = 120
 
 # A long session drifts onto new work while its title goes stale.
 RENAME_TOKEN_STEP = 100_000
+# Claude Code compacts a long conversation; a context that fell this far below
+# the naming baseline has been compacted even when the transcript marker has
+# scrolled out of the tail.
+COMPACTION_MIN_DROP = 50_000
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CLAUDE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 TRANSCRIPT_TAIL_BYTES = 400_000
 USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
@@ -302,6 +308,10 @@ def disambiguate(name: str, workspace_label: str, attempt: int) -> str:
     return name[: MAX_NAME_CHARS - len(suffix)].strip("-") + suffix
 
 
+def has_dropped_after_compaction(baseline: int, tokens: int) -> bool:
+    return baseline - tokens >= COMPACTION_MIN_DROP and tokens * 2 <= baseline
+
+
 def decide(
     stamp: Stamp | None,
     live_label: str | None,
@@ -310,6 +320,7 @@ def decide(
     now: int,
     force: bool = False,
     tokens: int | None = None,
+    compacted_at: float | None = None,
 ) -> str:
     """Verdict for one pane: rename, adopt-manual, skip-manual, skip-unchanged or skip-floor."""
     if force:
@@ -322,13 +333,14 @@ def decide(
         return "rename"
     if live_label and live_label != stamp.label_set:
         return "adopt-manual"
-    # A stamp written before this pane had a baseline must not read as 100k behind.
-    if (
-        tokens is not None
-        and stamp.tokens_at_naming is not None
-        and tokens - stamp.tokens_at_naming >= RENAME_TOKEN_STEP
-    ):
+    if compacted_at is not None and compacted_at > stamp.set_at:
         return "rename"
+    # A stamp written before this pane had a baseline must not read as 100k behind.
+    if tokens is not None and stamp.tokens_at_naming is not None:
+        if tokens - stamp.tokens_at_naming >= RENAME_TOKEN_STEP:
+            return "rename"
+        if has_dropped_after_compaction(stamp.tokens_at_naming, tokens):
+            return "rename"
     if live_label and stamp.title_hash == current_title_hash and not stamp.fallback:
         return "skip-unchanged"
     if now - stamp.set_at < RENAME_FLOOR_SECONDS:
@@ -471,30 +483,108 @@ def git_branch(cwd: str) -> str | None:
     return branch if completed.returncode == 0 and branch else None
 
 
-def context_tokens(session_id: str | None) -> int | None:
-    """Size of a Claude session's context, or None when there is no transcript.
+def pid_alive(pid: object) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
 
-    herdr publishes no token counts, so this reads the transcript the agent wrote.
+
+def resolve_session(agent_info: dict) -> str | None:
+    """The agent's session id: herdr's own, else the one Claude Code's session registry implies.
+
+    herdr reports no session for some Claude panes (an attached background session,
+    a pane that was already open). The registry lists every live session with its
+    cwd and display name, so the pane's session is the unclaimed live one in its cwd.
     """
+    reported = (agent_info.get("agent_session") or {}).get("value")
+    if reported or agent_info.get("agent") != "claude":
+        return reported
+    pane_id = agent_info.get("pane_id")
+    agents = (herdr("agent", "list") or {}).get("agents") or []
+    claimed = {
+        (other.get("agent_session") or {}).get("value")
+        for other in agents if other.get("pane_id") != pane_id
+    }
+    candidates = []
+    for path in CLAUDE_SESSIONS_DIR.glob("*.json"):
+        try:
+            entry = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(entry, dict)
+            and entry.get("entrypoint") == "cli"
+            and entry.get("cwd") == agent_info.get("cwd")
+            and entry.get("sessionId") not in claimed
+            and pid_alive(entry.get("pid"))
+        ):
+            candidates.append(entry)
+    if len(candidates) > 1:
+        title = normalise_title(agent_info.get("terminal_title_stripped") or "")
+        candidates = [c for c in candidates if title and normalise_title(c.get("name") or "") == title]
+    return candidates[0]["sessionId"] if len(candidates) == 1 else None
+
+
+def transcript_tail_lines(session_id: str | None) -> list[str]:
+    """The last lines of a Claude session's transcript, oldest first; empty when there is none."""
     if not session_id:
-        return None
+        return []
     transcripts = list(CLAUDE_PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
     if not transcripts:
-        return None
+        return []
     try:
         size = transcripts[0].stat().st_size
         with transcripts[0].open("rb") as handle:
             handle.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
-            tail = handle.read().decode("utf-8", "replace")
+            return handle.read().decode("utf-8", "replace").splitlines()
     except OSError:
-        return None
-    for line in reversed(tail.splitlines()):
-        try:
-            usage = (json.loads(line).get("message") or {}).get("usage")
-        except (json.JSONDecodeError, AttributeError):
-            continue
+        return []
+
+
+def parse_entry(line: str) -> dict:
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return {}
+    return entry if isinstance(entry, dict) else {}
+
+
+def is_compact_boundary(entry: dict) -> bool:
+    return entry.get("type") == "system" and entry.get("subtype") == "compact_boundary"
+
+
+def context_tokens(session_id: str | None) -> int | None:
+    """Size of a Claude session's context, or None when there is no transcript.
+
+    herdr publishes no token counts, so this reads the transcript the agent wrote.
+    A compaction leaves no usage until the next reply, so the figures before the
+    latest boundary describe a context that no longer exists and read as unknown.
+    """
+    for line in reversed(transcript_tail_lines(session_id)):
+        entry = parse_entry(line)
+        if is_compact_boundary(entry):
+            return None
+        usage = entry.get("message", {}).get("usage") if isinstance(entry.get("message"), dict) else None
         if usage:
             return sum(usage.get(field, 0) for field in USAGE_FIELDS)
+    return None
+
+
+def last_compaction(session_id: str | None) -> float | None:
+    """When Claude Code last compacted this session (epoch seconds), if the transcript tail shows it."""
+    for line in reversed(transcript_tail_lines(session_id)):
+        entry = parse_entry(line)
+        if not is_compact_boundary(entry):
+            continue
+        try:
+            stamped = datetime.fromisoformat(str(entry.get("timestamp")).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return stamped.timestamp()
     return None
 
 
@@ -918,10 +1008,11 @@ def rename_pane(pane_id: str, force: bool) -> int:
         return 0
     evidence, agent_info = gathered
     live_label = ((herdr("pane", "get", pane_id) or {}).get("pane") or {}).get("label")
-    session = (agent_info.get("agent_session") or {}).get("value")
+    session = resolve_session(agent_info)
     stamp = read_stamp(pane_id)
     tokens = context_tokens(session)
-    verdict = decide(stamp, live_label, session, title_hash(evidence.title), now, force, tokens)
+    compacted_at = last_compaction(session)
+    verdict = decide(stamp, live_label, session, title_hash(evidence.title), now, force, tokens, compacted_at)
 
     if verdict == "adopt-manual":
         write_stamp(pane_id, Stamp(
@@ -936,9 +1027,13 @@ def rename_pane(pane_id: str, force: bool) -> int:
         outcome = request_real_label(pane_id, evidence, session, tokens, now)
         if outcome == "failed":
             set_fallback_label(pane_id, evidence, session, stamp, live_label, now)
-    elif verdict != "skip-unchanged":
-        # The watcher polls every minute, so the steady state would drown the log.
-        log(f"{pane_id} {verdict}")
+    else:
+        if stamp is not None and stamp.tokens_at_naming is None and tokens is not None and not stamp.fallback and not stamp.manual:
+            # Named before a baseline existed (or while a compaction left none): measure growth from here.
+            write_stamp(pane_id, stamp.model_copy(update={"tokens_at_naming": tokens}))
+        if verdict != "skip-unchanged":
+            # The watcher polls every minute, so the steady state would drown the log.
+            log(f"{pane_id} {verdict}")
     sync_pane_tab(pane_id, agent_info, evidence.title, stamp)
     return 0
 
@@ -1009,10 +1104,43 @@ def set_fallback_label(
     log(f"{pane_id} fallback label {label!r}")
 
 
+def run_sweep() -> int:
+    """Name every open agent and start its watcher, for agents herdr never announced.
+
+    Restored agents and agents open before the plugin was linked get no
+    pane.agent_detected. Each pane gets a detached watch.sh, so this returns at once;
+    the watcher's lock keeps repeat sweeps from stacking duplicates.
+    """
+    agents = (herdr("agent", "list") or {}).get("agents") or []
+    script = Path(__file__).resolve().parent / "watch.sh"
+    started = 0
+    for agent in agents:
+        pane_id = agent.get("pane_id")
+        if not pane_id:
+            continue
+        env = {
+            key: value for key, value in os.environ.items()
+            if key not in ("HERDR_PLUGIN_EVENT", "HERDR_PLUGIN_EVENT_JSON", "HERDR_PLUGIN_CONTEXT_JSON")
+        }
+        env.update(HERDR_PANE_ID=pane_id, SMART_RENAME_RUN_FIRST="1")
+        try:
+            subprocess.Popen(
+                ["sh", str(script)], cwd=script.parent, env=env, start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            started += 1
+        except OSError as error:
+            log(f"sweep could not start a watcher for {pane_id}: {error}")
+    log(f"sweep started {started} of {len(agents)} agents")
+    return 0
+
+
 def main() -> int:
     flags = set(sys.argv[1:])
     if "--check" in flags:
         return run_check()
+    if "--sweep" in flags:
+        return run_sweep()
 
     pane_id, event = pane_from_environment()
     if not pane_id:

@@ -305,5 +305,35 @@ def test_a_stamp_with_no_baseline_never_triggers_on_tokens():
                   tokens=900_000) == "skip-unchanged"
 
 
+def test_a_compaction_since_naming_triggers_a_rename():
+    existing = stamp(tokens_at_naming=300_000, set_at=NOW - 600)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=None, compacted_at=NOW - 60) == "rename"
+
+
+def test_a_compaction_before_naming_does_not():
+    existing = stamp(tokens_at_naming=40_000, set_at=NOW - 600)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=45_000, compacted_at=NOW - 900) == "skip-unchanged"
+
+
+def test_a_token_drop_of_half_and_50k_reads_as_compaction():
+    existing = stamp(tokens_at_naming=300_000)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=150_000) == "rename"
+
+
+def test_a_token_dip_short_of_half_is_not_compaction():
+    existing = stamp(tokens_at_naming=300_000)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=150_001) == "skip-unchanged"
+
+
+def test_a_small_context_cannot_drop_far_enough_to_be_compaction():
+    existing = stamp(tokens_at_naming=40_000)
+    assert decide(existing, "Scrape tweets", SESSION, existing.title_hash, NOW,
+                  tokens=5_000) == "skip-unchanged"
+
+
 def test_force_overrides_every_skip():
     assert decide(stamp(manual=True), "My name", SESSION, "same", NOW, force=True) == "rename"

@@ -161,7 +161,7 @@ already per-agent. Claude publishes a task summary there; codex publishes its
 branch name, which is useless, so the plugin falls back to reading recent pane
 output.
 
-An agent is renamed when either signal says the work moved on:
+An agent is renamed when any signal says the work moved on:
 
 - **Its title changes materially.** Spinner glyphs, elapsed timers and token
   counters are stripped before comparing, so routine ticking triggers nothing.
@@ -169,6 +169,11 @@ An agent is renamed when either signal says the work moved on:
   its title stays stale, so the plugin takes a fresh look each 100k. The count is
   read from the Claude session transcript, which is the only place it exists —
   agents that keep no transcript never trip this and rely on the title alone.
+- **Claude Code compacts the conversation.** The transcript records a
+  `compact_boundary` entry; when it is newer than the last naming, the pane is
+  renamed once and the 100k step then measures from the post-compaction size.
+  A context that fell to half the naming baseline (and by 50k or more) counts
+  too, for when the entry has scrolled out of the transcript tail.
 
 **Until a model label exists, the pane shows the terminal title.** A fresh
 agent, a model that abstains, a provider error or a timeout all leave the pane
