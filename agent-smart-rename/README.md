@@ -187,9 +187,18 @@ is never mistaken for a manual rename. It follows later title changes, and the
 first model label replaces it. A label that is already on the pane is never
 overwritten by the fallback.
 
+**A Claude session you named with `/rename` keeps that name.** The session title
+from the transcript is shown as the pane label exactly as you typed it — no model
+call, and none of the 26-column, word-count or agent-name rules apply. While it
+is unchanged nothing relabels the pane: not the 60-second floor, not 100k more
+tokens, not a compaction. A new `/rename` replaces it. When the transcript's
+latest title record is empty the name counts as removed and the pane returns to
+automatic naming, starting with the next run.
+
 **Rename an agent by hand and the plugin never touches it again.** It notices
 that the live name is not the one it wrote and marks the agent as yours.
-`rename-now` and `reset-agent` reclaim it.
+`rename-now` and `reset-agent` reclaim it. A manual rename outranks a `/rename`
+session title too.
 
 Names are kebab-case slugs (`review-auth-flow`) because herdr requires
 `^[a-z][a-z0-9_-]{0,31}$` — a name doubles as a CLI target, so you can
@@ -212,9 +221,8 @@ if it still shows the plugin's name. `check-ai` never touches tabs.
 
 ## What gets sent, and where
 
-Naming needs context, so **the sanitised terminal title, the session's titles
-(the one you set with `/rename` and Claude Code's own summary), and the first
-five and last fifteen messages you typed to the agent (each cut to 200
+Naming needs context, so **the sanitised terminal title, Claude Code's own
+summary of the session, and the first five and last fifteen messages you typed to the agent (each cut to 200
 characters) are sent to your configured provider.** Pane output is never read.
 Before anything leaves the machine the payload has `$HOME` rewritten to `~`, and
 API keys, GitHub and Slack tokens, bearer tokens, private-key blocks,
@@ -248,6 +256,6 @@ runs cannot lose each other's lines, and in
 uv run --with pytest --with httpx --with pydantic pytest tests/ -q
 ```
 
-114 tests over the pure functions and the rename flow — no network, no herdr and no real model call required. Design notes
+206 tests over the pure functions and the rename flow — no network, no herdr and no real model call required. Design notes
 and the empirically verified platform behaviour are in
 `docs/superpowers/specs/2026-07-24-herdr-agent-smart-rename-design.md`.

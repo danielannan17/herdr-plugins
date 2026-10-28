@@ -140,6 +140,8 @@ class Stamp(BaseModel):
     tab_manual: bool = False
     # The terminal title at the last run: herdr-bar titles tabs from it.
     title_seen: str | None = None
+    # label_set is this Claude session title, set by the user with /rename and shown as is.
+    custom_title: str | None = None
 
 
 class Evidence(BaseModel):
@@ -317,6 +319,7 @@ def decide(
     force: bool = False,
     tokens: int | None = None,
     compacted_at: float | None = None,
+    custom_title: str | None = None,
 ) -> str:
     """Verdict for one pane: rename, adopt-manual, skip-manual, skip-unchanged or skip-floor."""
     if force:
@@ -329,6 +332,11 @@ def decide(
         return "rename"
     if live_label and live_label != stamp.label_set:
         return "adopt-manual"
+    if custom_title:
+        # The user's own name for the session holds until they change or remove it.
+        return "skip-unchanged" if live_label and stamp.custom_title == custom_title else "rename"
+    if stamp.custom_title:
+        return "rename"
     if compacted_at is not None and compacted_at > stamp.set_at:
         return "rename"
     # A stamp written before this pane had a baseline must not read as 100k behind.
@@ -592,11 +600,13 @@ def typed_message(entry: dict) -> str:
 
 
 def title_records(entry: dict) -> dict[str, str]:
-    """The session title a transcript record carries, keyed "ai_title" or "custom_title"."""
+    """The session title a transcript record carries, keyed "ai_title" or "custom_title".
+
+    An empty title is returned too: it is how a name is removed, so it must outrank earlier records.
+    """
     fields = {"ai-title": ("ai_title", "aiTitle"), "custom-title": ("custom_title", "customTitle")}
     key, field = fields.get(entry.get("type"), (None, None))
-    title = stripped(entry.get(field)) if key else ""
-    return {key: title} if title else {}
+    return {key: stripped(entry.get(field))} if key and isinstance(entry.get(field), str) else {}
 
 
 def scan_transcript_head(handle) -> tuple[list[str], dict[str, str], int]:
@@ -661,8 +671,8 @@ def session_history(session_id: str | None) -> dict:
         return history
     titles = {**head_titles, **tail_titles}
     history.update(
-        ai_title=titles.get("ai_title"),
-        custom_title=titles.get("custom_title"),
+        ai_title=titles.get("ai_title") or None,
+        custom_title=titles.get("custom_title") or None,
         first_messages=first,
         latest_messages=latest,
     )
@@ -1088,7 +1098,11 @@ def rename_pane(pane_id: str, force: bool) -> int:
     stamp = read_stamp(pane_id)
     tokens = context_tokens(session)
     compacted_at = last_compaction(session)
-    verdict = decide(stamp, live_label, session, title_hash(evidence.title), now, force, tokens, compacted_at)
+    history = session_history(session)
+    custom_title = history["custom_title"]
+    verdict = decide(
+        stamp, live_label, session, title_hash(evidence.title), now, force, tokens, compacted_at, custom_title
+    )
 
     if verdict == "adopt-manual":
         write_stamp(pane_id, Stamp(
@@ -1099,8 +1113,10 @@ def rename_pane(pane_id: str, force: bool) -> int:
         ))
         log(f"{pane_id} adopted manual label {live_label!r}")
         return 0
-    if verdict == "rename":
-        outcome = request_real_label(pane_id, evidence, session, tokens, now)
+    if verdict == "rename" and custom_title:
+        apply_custom_title(pane_id, custom_title, evidence, session, tokens, now)
+    elif verdict == "rename":
+        outcome = request_real_label(pane_id, evidence, session, tokens, now, history)
         if outcome == "failed":
             set_fallback_label(pane_id, evidence, session, stamp, live_label, now)
     else:
@@ -1114,11 +1130,28 @@ def rename_pane(pane_id: str, force: bool) -> int:
     return 0
 
 
+def apply_custom_title(
+    pane_id: str, title: str, evidence: Evidence, session: str | None, tokens: int | None, now: int
+) -> None:
+    """Show the session title the user set with /rename in full, with no model call or length rules."""
+    applied = apply_label(pane_id, title, evidence.workspace_label)
+    if applied is None:
+        return
+    write_stamp(pane_id, Stamp(
+        label_set=applied, name_set=name_for(applied),
+        title_hash=title_hash(evidence.title),
+        agent_session_id=session, set_at=now, manual=False,
+        tokens_at_naming=tokens, custom_title=title,
+    ))
+    log(f"{pane_id} labelled {applied!r} from the session title")
+
+
 def request_real_label(
-    pane_id: str, evidence: Evidence, session: str | None, tokens: int | None, now: int
+    pane_id: str, evidence: Evidence, session: str | None, tokens: int | None, now: int,
+    history: dict | None = None,
 ) -> str:
     """Try for a model-generated label: "applied", "failed", or "busy" when another run holds the lock."""
-    evidence = evidence.model_copy(update=session_history(session))
+    evidence = evidence.model_copy(update=history or session_history(session))
     if evidence_is_thin(evidence):
         log(f"{pane_id} shows no task yet, title={evidence.title!r}")
         return "failed"
@@ -1165,10 +1198,10 @@ def set_fallback_label(
     label = fallback_label(evidence.title)
     if label is None:
         return
-    ours = stamp is not None and stamp.fallback and live_label == stamp.label_set
+    ours = stamp is not None and (stamp.fallback or stamp.custom_title) and live_label == stamp.label_set
     if live_label and not ours:
         return
-    if ours and (live_label == label or stamp.title_hash == title_hash(evidence.title)):
+    if ours and (live_label == label or (stamp.fallback and stamp.title_hash == title_hash(evidence.title))):
         return
     result = herdr("pane", "rename", pane_id, label)
     if not result or "error" in result:
