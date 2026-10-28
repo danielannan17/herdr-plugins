@@ -14,8 +14,8 @@ from rename import (  # noqa: E402
     extract_name,
     normalise_title,
     redact,
+    render_evidence,
     slugify,
-    strip_agent_banner,
     title_hash,
     title_is_junk,
     name_for,
@@ -32,7 +32,6 @@ def evidence(**overrides):
         cwd="/Users/cm/dev/aa-worktrees/pipette-data-pipeline",
         branch="main",
         title=None,
-        recent_output=None,
     )
     base.update(overrides)
     return Evidence(**base)
@@ -127,28 +126,33 @@ def test_cap_keeps_the_most_recent_tail():
 
 # --- evidence selection ------------------------------------------------------
 
-def test_banner_lines_are_stripped():
-    banner = "╭──────────╮\n│ Welcome to Claude Code │\n╰──────────╯\n  cwd: /Users/cm/dev\n"
-    assert strip_agent_banner(banner).strip() == ""
-
-
 def test_a_good_title_alone_is_enough_evidence():
     assert not evidence_is_thin(evidence(title="✳ Evaluate upserting to BigQuery warehouse"))
 
 
-def test_junk_title_with_no_output_is_thin():
-    assert evidence_is_thin(evidence(title="main", recent_output=""))
+def test_junk_title_with_no_user_messages_is_thin():
+    assert evidence_is_thin(evidence(title="main"))
 
 
-def test_junk_title_with_substantial_output_is_not_thin():
-    body = "diff --git a/upsert.py b/upsert.py\n- old ordering\n+ new ordering, dedup on key\n"
-    assert not evidence_is_thin(evidence(title="main", recent_output=body))
+def test_junk_title_with_a_user_message_is_not_thin():
+    assert not evidence_is_thin(evidence(title="main", user_messages=["fix the upsert ordering"]))
 
 
-def test_banner_only_output_is_thin():
-    assert evidence_is_thin(
-        evidence(title=None, recent_output="╭────╮\n│ Welcome to Claude Code │\n╰────╯")
+def test_no_title_and_no_user_messages_is_thin():
+    assert evidence_is_thin(evidence(title=None))
+
+
+def test_user_messages_are_rendered_redacted_and_capped():
+    rendered = render_evidence(
+        evidence(user_messages=["look at /Users/cm/dev/app", "word " * 100, "line one\n   line two"]), HOME
     )
+    assert "- look at ~/dev/app" in rendered
+    assert "- " + ("word " * 100)[:300] + "\n" in rendered
+    assert "- line one line two" in rendered
+
+
+def test_pane_output_is_not_in_the_evidence():
+    assert "recent output" not in render_evidence(evidence(title="main"), HOME)
 
 
 # --- label validation --------------------------------------------------------

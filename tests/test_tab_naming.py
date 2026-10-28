@@ -55,7 +55,7 @@ def flow(tmp_path, monkeypatch):
     def gather(pane_id):
         evidence = Evidence(
             agent="claude", workspace_label="app", cwd="/w", branch="main",
-            title=fake.title, recent_output=None,
+            title=fake.title,
         )
         return evidence, {"name": None, "agent_session": {"value": "s1"}, "tab_id": "w1:t6"}
 

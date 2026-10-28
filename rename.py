@@ -51,14 +51,22 @@ TRANSCRIPT_TAIL_BYTES = 400_000
 USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
 EVIDENCE_CHAR_CAP = 4000
-MIN_OUTPUT_CHARS = 40
-RECENT_OUTPUT_LINES = 120
+USER_MESSAGE_COUNT = 5
+USER_MESSAGE_CHAR_CAP = 300
 LOG_BYTE_CAP = 64_000
 
 AGENT_LABELS = {
     "claude", "codex", "cursor", "copilot", "devin", "droid", "kilo", "kimi",
     "pi", "omp", "hermes", "qodercli", "mastracode", "aider", "goose", "amp",
 }
+
+# User records Claude Code writes that the user did not type: slash-command and
+# `!` shell echoes, reminders, background-task notices.
+NON_TYPED_MESSAGE = re.compile(
+    r"<(command-name|command-message|local-command-stdout|local-command-stderr|local-command-caveat"
+    r"|bash-input|bash-stdout|bash-stderr|task-notification|system-reminder)\b",
+    re.I,
+)
 
 # Spinner glyphs, elapsed timers and token counters churn constantly; a title
 # that differs only in these has not materially changed.
@@ -136,7 +144,7 @@ class Evidence(BaseModel):
     cwd: str
     branch: str | None
     title: str | None
-    recent_output: str | None
+    user_messages: list[str] = []
 
 
 class NameResponse(BaseModel):
@@ -180,45 +188,8 @@ def redact(text: str, home: str) -> str:
 
 
 def cap_tail(text: str, limit: int = EVIDENCE_CHAR_CAP) -> str:
-    """Keep the most recent end of the output, which is where the current task lives."""
+    """Keep the most recent end of the text, which is where the current task lives."""
     return text if len(text) <= limit else text[-limit:]
-
-
-def strip_agent_banner(text: str) -> str:
-    """Drop the welcome/banner box agents print at startup, which names no task."""
-    lines = [line for line in text.splitlines() if line.strip()]
-    kept = [
-        line
-        for line in lines
-        if not re.match(r"^[\s│┃|╭╰─═╔╚*>#]*(welcome|tips? for|/help|cwd:|version)", line, re.I)
-        and not re.fullmatch(r"[\s─═━╌╍_\-*=~#│┃|╭╮╯╰┌┐└┘]+", line)
-    ]
-    return "\n".join(kept)
-
-
-def is_rule_line(line: str) -> bool:
-    """True for a horizontal rule, which Claude Code may embed a title in."""
-    stripped = line.strip()
-    return stripped.count("─") >= 20 and stripped.count("─") * 2 >= len(stripped)
-
-
-def trim_agent_footer(text: str) -> str:
-    """Drop Claude Code's input box and everything rendered below it.
-
-    The footer is a rule, the `❯` prompt line, a second rule, then the
-    statusline. The last `❯` line only marks the box when a rule sits directly
-    above it; without one (a dialog is up, or another agent) the text is kept.
-    """
-    lines = text.splitlines()
-    prompt = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].lstrip().startswith("❯")), None)
-    if prompt is None:
-        return text
-    above = prompt - 1
-    while above >= 0 and not lines[above].strip():
-        above -= 1
-    if above < 0 or not is_rule_line(lines[above]):
-        return text
-    return "\n".join(lines[:above])
 
 
 def display_width(text: str) -> int:
@@ -249,8 +220,7 @@ def fallback_label(title: str | None) -> str | None:
 def evidence_is_thin(evidence: Evidence) -> bool:
     if evidence.title and not title_is_junk(evidence.title, evidence.cwd, evidence.branch):
         return False
-    body = strip_agent_banner(evidence.recent_output or "")
-    return len(body.strip()) < MIN_OUTPUT_CHARS
+    return not evidence.user_messages
 
 
 def render_evidence(evidence: Evidence, home: str) -> str:
@@ -264,9 +234,12 @@ def render_evidence(evidence: Evidence, home: str) -> str:
         parts.append(f"branch: {evidence.branch}")
     if evidence.title and not title_is_junk(evidence.title, evidence.cwd, evidence.branch):
         parts.append(f"title: {redact(evidence.title, home)}")
-    body = strip_agent_banner(evidence.recent_output or "").strip()
-    if body:
-        parts.append("recent output:\n" + cap_tail(redact(body, home)))
+    if evidence.user_messages:
+        lines = [
+            "- " + redact(" ".join(message.split()), home)[:USER_MESSAGE_CHAR_CAP]
+            for message in evidence.user_messages
+        ]
+        parts.append("the user's last messages, oldest first:\n" + cap_tail("\n".join(lines)))
     return "\n".join(parts)
 
 
@@ -436,25 +409,8 @@ def release_lock(pane_id: str) -> None:
     lock_path(pane_id).unlink(missing_ok=True)
 
 
-def herdr_raw(*args: str) -> str | None:
-    """Call the herdr CLI over the injected socket and return raw stdout."""
-    binary = os.environ.get("HERDR_BIN_PATH") or "herdr"
-    try:
-        completed = subprocess.run(
-            [binary, *args], capture_output=True, text=True, timeout=15, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        log(f"herdr {' '.join(args)} failed: {error}")
-        return None
-    if completed.returncode != 0:
-        log(f"herdr {' '.join(args)} rc={completed.returncode}: "
-            f"{(completed.stdout or completed.stderr).strip()[:160]}")
-        return None
-    return completed.stdout
-
-
 def herdr(*args: str) -> dict | None:
-    """Return the result payload of a herdr CLI call. `agent read` is raw text — use herdr_raw."""
+    """Return the result payload of a herdr CLI call."""
     binary = os.environ.get("HERDR_BIN_PATH") or "herdr"
     try:
         completed = subprocess.run(
@@ -586,6 +542,26 @@ def last_compaction(session_id: str | None) -> float | None:
             return None
         return stamped.timestamp()
     return None
+
+
+def recent_user_messages(session_id: str | None) -> list[str]:
+    """The last messages the user typed in a Claude session, oldest first; empty when there is no transcript."""
+    messages = []
+    for line in transcript_tail_lines(session_id):
+        entry = parse_entry(line)
+        if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            content = "\n".join(
+                block.get("text") or "" for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        text = content.strip() if isinstance(content, str) else ""
+        if text and not NON_TYPED_MESSAGE.match(text):
+            messages.append(text)
+    return messages[-USER_MESSAGE_COUNT:]
 
 
 def read_settings() -> dict[str, str]:
@@ -789,10 +765,6 @@ def gather_evidence(pane_id: str) -> tuple[Evidence, dict] | None:
         return None
     pane_info = (herdr("pane", "get", pane_id) or {}).get("pane") or {}
     cwd = agent_info.get("cwd") or pane_info.get("cwd") or ""
-    recent = herdr_raw(
-        "agent", "read", pane_id, "--source", "recent",
-        "--lines", str(RECENT_OUTPUT_LINES), "--format", "text",
-    )
     workspaces = (herdr("workspace", "list") or {}).get("workspaces") or []
     label = next(
         (w.get("label", "") for w in workspaces if w.get("workspace_id") == agent_info.get("workspace_id")),
@@ -804,7 +776,6 @@ def gather_evidence(pane_id: str) -> tuple[Evidence, dict] | None:
         cwd=cwd,
         branch=git_branch(cwd) if cwd else None,
         title=pane_info.get("terminal_title_stripped"),
-        recent_output=trim_agent_footer(recent) if recent else recent,
     )
     return evidence, agent_info
 
@@ -985,7 +956,7 @@ def run_check() -> int:
     print(f"titles: {titles}/{len(agents or [])} panes publish one")
     if agents and not titles:
         print("  hint: add terminal_title_stripped to [ui.sidebar.agents] rows in config.toml,")
-        print("        otherwise herdr never syncs OSC titles and naming falls back to pane output")
+        print("        otherwise herdr never syncs OSC titles and naming falls back to the user's messages")
     named = sum(1 for agent in agents or [] if agent.get("name"))
     print(f"named: {named}/{len(agents or [])} agents currently carry a name")
     return 0
@@ -1042,6 +1013,7 @@ def request_real_label(
     pane_id: str, evidence: Evidence, session: str | None, tokens: int | None, now: int
 ) -> str:
     """Try for a model-generated label: "applied", "failed", or "busy" when another run holds the lock."""
+    evidence = evidence.model_copy(update={"user_messages": recent_user_messages(session)})
     if evidence_is_thin(evidence):
         log(f"{pane_id} shows no task yet, title={evidence.title!r}")
         return "failed"

@@ -37,7 +37,6 @@ read off a source checkout:
 | Codex does not | title is the branch name, `main` |
 | Sidebar is 26 columns and ellipsizes | `sidebar_width` default 26; rows use `truncate_end` |
 | **Names must match `^[a-z][a-z0-9_-]{0,31}$`** | probed the validator: `scrape-tweets` and `review_auth_flow` accepted; `Scrape-Tweets`, `2fast`, `-leading-dash` and 33 chars all rejected with `invalid_agent_name` |
-| **`agent read` returns raw stdout, not JSON** | every other call returns a JSON envelope; `agent read --format text` returns the pane text directly |
 
 Two constraints that follow from 0.7.5's release notes and were designed around:
 agent names must be unique across the session, and they are cleared when the
@@ -119,16 +118,16 @@ multiplexer, and must never spam its log.
 
 1. **OSC title** — `terminal_title_stripped` from `herdr pane get`. Free, already
    per-agent, and for Claude it is a task summary.
-2. **Recent pane output** — `herdr agent read <pane> --source recent --format text
-   --lines 120`, used when the title is missing or junk. `--format text` is
-   requested so no ANSI ever reaches the sanitiser.
+2. **The user's last messages** — the last five typed messages from the Claude
+   session transcript, sent alongside the title. Pane output is never read:
+   herdr captures history by scrolling the visible pane.
 3. **cwd basename and git branch** — supporting context only, never the whole name.
 
 A title counts as junk when it is empty, equals the cwd basename, equals the git
 branch, or is a bare path. That is what demotes codex's `main` to route 2.
 
-Evidence is "too thin" when there is no usable title *and* the recent output is
-below a minimum length or matches only a known agent banner.
+Evidence is "too thin" when there is no usable title *and* there are no user
+messages yet.
 
 ### Sanitisation, before anything leaves the machine
 

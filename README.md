@@ -120,7 +120,7 @@ rows = [
 ```
 
 Then `herdr server reload-config`. If `check-ai` reports `titles: 0/N`, this is
-the missing piece and naming will fall back to reading pane output.
+the missing piece and naming will fall back to the user's last messages.
 
 ## Actions
 
@@ -158,8 +158,8 @@ Python script did the waiting itself.
 
 Evidence comes from the agent's OSC terminal title first, because it is free and
 already per-agent. Claude publishes a task summary there; codex publishes its
-branch name, which is useless, so the plugin falls back to reading recent pane
-output.
+branch name, which is useless, so the plugin adds the last messages you typed to
+a Claude session.
 
 An agent is renamed when any signal says the work moved on:
 
@@ -182,11 +182,6 @@ word boundary to fit 26 columns. The title is recorded as plugin-written, so it
 is never mistaken for a manual rename. It follows later title changes, and the
 first model label replaces it. A label that is already on the pane is never
 overwritten by the fallback.
-
-When the pane output comes from Claude Code, the input box and everything
-rendered below it (the statusline, the mode line) is dropped before the output
-is sent. The cut is made at the rule above the last `❯` prompt line; output with
-no rule above its last prompt is sent whole.
 
 **Rename an agent by hand and the plugin never touches it again.** It notices
 that the live name is not the one it wrote and marks the agent as yours.
@@ -213,17 +208,20 @@ if it still shows the plugin's name. `check-ai` never touches tabs.
 
 ## What gets sent, and where
 
-Naming needs context, so **the sanitised terminal title and a tail of recent
-pane output are sent to your configured provider.** Before anything leaves the
+Naming needs context, so **the sanitised terminal title and the last five
+messages you typed to the agent (each cut to 300 characters) are sent to your
+configured provider.** Pane output is never read. Before anything leaves the
 machine the payload has `$HOME` rewritten to `~`, and API keys, GitHub and Slack
 tokens, bearer tokens, private-key blocks, `secret=`/`password=`-style
 assignments, and long high-entropy strings replaced with `[redacted]`.
 
-That is a real reduction in exposure, not a guarantee. If a pane holds something
+That is a real reduction in exposure, not a guarantee. If your messages hold something
 that must never reach a third party, don't run this plugin against it.
 
-The Claude session transcript is opened only to read the token count off its last
-usage record. Nothing from it is sent anywhere.
+Your messages come from the Claude session transcript; slash-command echoes,
+shell output, reminders and tool results are left out. The transcript is also
+read for the token count off its last usage record. Agents that keep no Claude
+transcript are named from the terminal title alone.
 
 ## Failure behaviour
 

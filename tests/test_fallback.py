@@ -10,72 +10,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import rename  # noqa: E402
 from rename import Evidence, Stamp  # noqa: E402
 
-RULE = "─" * 100
-
-
-# --- footer trimming ---------------------------------------------------------
-
-def screen(*body, prompt="❯"):
-    footer = [RULE, prompt, RULE, "    ~/Projects/app (main)", "    🧠 Opus 5.5 │ Ctx: 15%", "  ⏵⏵ auto mode on"]
-    return "\n".join([*body, *footer])
-
-
-def test_the_input_box_and_statusline_are_dropped():
-    text = screen("⏺ Fixed the export.", "✻ Baked for 8s")
-    assert rename.trim_agent_footer(text) == "⏺ Fixed the export.\n✻ Baked for 8s"
-
-
-def test_a_titled_rule_marks_the_box_too():
-    titled = "─" * 80 + " Routing messages to Acra sessions ─"
-    text = "\n".join(["⏺ Done.", titled, "❯ ok restart agentd", RULE, "    statusline"])
-    assert rename.trim_agent_footer(text) == "⏺ Done."
-
-
-def test_blank_lines_between_rule_and_prompt_are_tolerated():
-    text = "\n".join(["⏺ Done.", RULE, "", "❯", RULE, "statusline"])
-    assert rename.trim_agent_footer(text) == "⏺ Done."
-
-
-def test_a_multi_line_draft_in_the_box_is_dropped_whole():
-    text = screen("⏺ Done.", prompt="❯ first line of a draft\n  second line")
-    assert rename.trim_agent_footer(text) == "⏺ Done."
-
-
-def test_earlier_user_messages_survive():
-    text = screen("❯ add csv export", "⏺ Added.", "❯ now fix the test", "⏺ Fixed.")
-    assert rename.trim_agent_footer(text) == "❯ add csv export\n⏺ Added.\n❯ now fix the test\n⏺ Fixed."
-
-
-def test_a_prompt_without_a_rule_above_it_is_not_a_marker():
-    text = "⏺ Added.\n❯ a user message with no input box on screen\n⏺ Working on it"
-    assert rename.trim_agent_footer(text) == text
-
-
-def test_output_without_any_prompt_is_untouched():
-    text = "$ ls\nfile.txt\n" + RULE
-    assert rename.trim_agent_footer(text) == text
-
-
-def test_a_short_rule_is_not_a_marker():
-    text = "⏺ Added.\n---------\n❯\nstatus"
-    assert rename.trim_agent_footer(text) == text
-
-
-def test_gather_evidence_sends_the_trimmed_output(monkeypatch):
-    def fake_herdr(*args):
-        if args[:2] == ("agent", "get"):
-            return {"agent": {"agent": "claude", "cwd": "/w", "workspace_id": "w1"}}
-        if args[:2] == ("pane", "get"):
-            return {"pane": {"terminal_title_stripped": "Some task title"}}
-        return {"workspaces": []}
-
-    monkeypatch.setattr(rename, "herdr", fake_herdr)
-    monkeypatch.setattr(rename, "herdr_raw", lambda *args: screen("⏺ Fixed the export."))
-    monkeypatch.setattr(rename, "git_branch", lambda cwd: None)
-    evidence, _ = rename.gather_evidence("w1:p1")
-    assert evidence.recent_output == "⏺ Fixed the export."
-
-
 # --- fallback text -----------------------------------------------------------
 
 def test_a_short_title_is_used_whole():
@@ -140,7 +74,7 @@ def flow(tmp_path, monkeypatch):
     def gather(pane_id):
         evidence = Evidence(
             agent="claude", workspace_label="app", cwd="/w", branch="main",
-            title=fake.title, recent_output=None,
+            title=fake.title,
         )
         return evidence, {"name": None, "agent_session": {"value": "s1"}}
 

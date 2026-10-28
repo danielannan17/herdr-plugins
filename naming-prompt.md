@@ -3,7 +3,8 @@ sidebar can tell at a glance what it is working on.
 
 You will be given the evidence available for one agent: which agent program it
 is, the workspace it sits in, its working directory and git branch, the terminal
-title it published, and a tail of its recent output. Some fields may be missing.
+title it published, and the last few messages the user sent it. Some fields may
+be missing.
 
 Reply with exactly one JSON object and nothing else:
 
@@ -48,8 +49,8 @@ Too long — do not do this:
     Deduplicate the evaluation results        33
     Clean up the configuration files          31
 
-If the evidence does not support a specific label — a fresh shell, a banner with
-no task, output that is only a prompt — reply with:
+If the evidence does not support a specific label — a fresh session, a
+title with no task, messages that are only a greeting — reply with:
 
 {"name": null, "reason": "insufficient evidence"}
 

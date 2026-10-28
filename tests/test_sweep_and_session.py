@@ -126,7 +126,7 @@ def test_a_pane_without_a_herdr_session_is_renamed_after_100k_more_tokens(claude
 
     replies = iter(["Install herdr plugins", "Fix scrolling bug"])
     evidence = Evidence(agent="claude", workspace_label="app", cwd=CWD, branch="main",
-                        title=TITLE, recent_output=None)
+                        title=TITLE)
     monkeypatch.setattr(rename, "herdr", fake_herdr)
     monkeypatch.setattr(rename, "gather_evidence", lambda pane_id: (evidence, info()))
     monkeypatch.setattr(rename, "sync_pane_tab", lambda *args: None)
@@ -179,7 +179,7 @@ class Pane:
         self.renames = 0
         agent = info("mine" if herdr_session else None)
         evidence = Evidence(agent="claude", workspace_label="app", cwd=CWD, branch="main",
-                            title=TITLE, recent_output=None)
+                            title=TITLE)
 
         def fake_herdr(*args):
             if args[:2] == ("pane", "get"):
@@ -380,3 +380,91 @@ def test_a_dead_watchers_lock_is_replaced(watcher):
     lock.mkdir(parents=True)
     (lock / "pid").write_text(str(dead_pid()))
     assert watcher.run(run_first=True) == ["w4:p4"]
+
+
+# --- the user's own messages from the transcript ----------------------------
+
+def user(content, **flags):
+    return {"type": "user", "message": {"role": "user", "content": content}, **flags}
+
+
+def write_transcript(home, session_id, entries, first_line=None):
+    lines = [first_line] if first_line is not None else []
+    lines += [e if isinstance(e, str) else json.dumps(e) for e in entries]
+    (home.projects / f"{session_id}.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def test_string_content_is_a_user_message(claude_home):
+    write_transcript(claude_home, "s", [user("fix the upsert ordering")])
+    assert rename.recent_user_messages("s") == ["fix the upsert ordering"]
+
+
+def test_only_text_blocks_of_a_block_list_are_kept(claude_home):
+    write_transcript(claude_home, "s", [
+        user([{"type": "text", "text": "  add csv export "}, {"type": "image", "source": {}}]),
+        user([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
+    ])
+    assert rename.recent_user_messages("s") == ["add csv export"]
+
+
+def test_meta_and_sidechain_records_are_skipped(claude_home):
+    write_transcript(claude_home, "s", [
+        user("meta caveat", isMeta=True),
+        user("subagent prompt", isSidechain=True),
+        {"type": "assistant", "message": {"content": "an answer"}},
+        user("real request"),
+    ])
+    assert rename.recent_user_messages("s") == ["real request"]
+
+
+@pytest.mark.parametrize("wrapped", [
+    "<command-name>/clear</command-name>",
+    "<command-message>review</command-message>",
+    "<local-command-stdout>done</local-command-stdout>",
+    "<local-command-caveat>Caveat: generated locally</local-command-caveat>",
+    "<bash-input>ls</bash-input>",
+    "<bash-stdout>file.txt</bash-stdout>",
+    "<task-notification>build finished</task-notification>",
+    "<System-Reminder>be careful</System-Reminder>",
+])
+def test_wrapped_non_typed_messages_are_dropped(claude_home, wrapped):
+    write_transcript(claude_home, "s", [user(wrapped), user("   "), user("typed by hand")])
+    assert rename.recent_user_messages("s") == ["typed by hand"]
+
+
+def test_a_message_that_merely_mentions_a_tag_is_kept(claude_home):
+    write_transcript(claude_home, "s", [user("why does <command-name> show up in the log?")])
+    assert rename.recent_user_messages("s") == ["why does <command-name> show up in the log?"]
+
+
+def test_a_cut_first_line_is_skipped(claude_home):
+    write_transcript(claude_home, "s", [user("first")], first_line='tId": "x", "message": {"content": "cut off')
+    assert rename.recent_user_messages("s") == ["first"]
+
+
+def test_only_the_last_five_come_back_oldest_first(claude_home):
+    write_transcript(claude_home, "s", [user(f"message {n}") for n in range(8)])
+    assert rename.recent_user_messages("s") == [f"message {n}" for n in range(3, 8)]
+
+
+def test_no_session_or_transcript_means_no_messages(claude_home):
+    assert rename.recent_user_messages(None) == []
+    assert rename.recent_user_messages("missing") == []
+
+
+def test_the_model_is_sent_the_users_messages_not_pane_output(claude_home, monkeypatch):
+    write_transcript(claude_home, "s", [user("fix the upsert ordering")])
+    sent = []
+    monkeypatch.setattr(rename, "load_config", lambda: SimpleNamespace(provider="x"))
+    monkeypatch.setattr(rename, "load_prompt", lambda: "prompt")
+    monkeypatch.setattr(rename, "request_name", lambda config, prompt, text: sent.append(text) or None)
+    evidence = Evidence(agent="claude", workspace_label="app", cwd=CWD, branch=None, title="main")
+    assert rename.request_real_label("w4:p4", evidence, "s", None, 1_000_000) == "failed"
+    assert "- fix the upsert ordering" in sent[0]
+    assert "recent output" not in sent[0]
+
+
+def test_a_junk_title_and_no_messages_never_reaches_the_model(claude_home, monkeypatch):
+    monkeypatch.setattr(rename, "request_name", lambda *args: pytest.fail("model called"))
+    evidence = Evidence(agent="claude", workspace_label="app", cwd=CWD, branch=None, title="main")
+    assert rename.request_real_label("w4:p4", evidence, "s", None, 1_000_000) == "failed"
