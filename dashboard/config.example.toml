@@ -1,0 +1,74 @@
+# herdr-dashboard configuration.
+#
+# Copy to the plugin's config directory (it is created by `herdr plugin link`):
+#
+#   cp config.example.toml "$(herdr plugin config-dir herdr-dashboard)/config.toml"
+#
+# The file is re-read every time the popup opens, switches mode or reloads (Ctrl+B r),
+# so edits need no restart. A missing file means "nothing configured".
+
+# Personal: one dashboard, the same in every workspace. Not configured yet; it will
+# later be a custom TUI.
+[personal]
+# command = "my-personal-tui"
+
+# Work: one table per workspace, selected by the workspace's label (the name in
+# Herdr's sidebar), compared ignoring case and punctuation: the key
+# `disposable-camera` matches a workspace labelled "Disposable Camera".
+#
+# Herdr gives a workspace no id that survives restarts and no stable path (see the
+# README), so every entry may also list extra matchers:
+#   label = ["name", "other name"]   labels that select this entry (default: the key)
+#   path  = "~/Projects/some-repo"   a workspace whose focused pane is inside this
+#                                    directory also matches; survives renaming
+#
+# Each entry runs one command:
+#   command   string (split like a shell line) or argv list
+#   args      appended to command; a leading ~ in command or args is expanded
+#   env       extra environment variables
+#   cwd       working directory (default: the entry's first `path`, else the focused
+#             pane's directory)
+#   bare_keys true: Tab / Shift+Tab / Esc switch and close without Ctrl+B
+#             (default false; see [keys])
+
+# Disposable Camera -> gh board, a GitHub CLI extension
+# (gh extension install uzimaru0000/gh-board), opened on its GitHub Project.
+[workspaces.disposable-camera]
+command = ["gh", "board"]
+args = ["--owner", "danielannan17", "12"]
+# path = "~/Projects/disposable-camera"
+
+[workspaces.claude-config]
+command = ["gh", "dash"]
+# Filter by repository with a gh-dash config file of your own:
+# args = ["--config", "~/.config/gh-dash/claude-config.yml"]
+
+[workspaces.pulse-planner]
+command = ["gh", "dash"]
+# args = ["--config", "~/.config/gh-dash/pulse-planner.yml"]
+
+[workspaces.personal-agent-marketplace]
+command = ["gh", "dash"]
+# args = ["--config", "~/.config/gh-dash/personal-agent-marketplace.yml"]
+
+# Keys. Herdr's own prefix bindings do not fire while a popup has focus, so the popup
+# handles them itself: Ctrl+B (the leader), then
+#   d  close      Tab  next mode      Shift+Tab  previous mode
+#   p  Personal   w    Work           r  reload config and restart
+#   Ctrl+B  send a literal Ctrl+B to the dashboard
+# The leader and the close key follow your Herdr config (`keys.prefix` and the
+# `prefix+<key>` bound to herdr-dashboard.open); override them here if needed.
+[keys]
+# leader = "ctrl+b"
+# toggle = "d"
+# Intercept bare Tab / Shift+Tab / Esc for every dashboard. Off by default because
+# dashboards use them: gh dash uses Esc to leave search and help, Tab to complete.
+# bare = false
+
+[popup]
+# width = "90%"     # cells (120) or a percentage
+# height = "90%"
+
+[ui]
+# One reversed row at the bottom shows the mode, the workspace and the key hints.
+# footer = true

@@ -1,0 +1,29 @@
+id = "herdr-dashboard"
+name = "Dashboard"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Workspace-aware Personal/Work dashboards in a floating popup"
+platforms = ["macos", "linux"]
+
+# Popup panes are session-modal terminals that float over the tiled layout and
+# over overlay panes. Size here is the default; [popup] in config.toml overrides
+# it on each open.
+[[panes]]
+id = "dashboard"
+title = "Dashboard"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["python3", "dashboard.py", "run"]
+
+# Opens the popup, or closes it when it is already open. Bind it with
+#   [[keys.command]]
+#   key = "prefix+d"
+#   type = "plugin_action"
+#   command = "herdr-dashboard.open"
+[[actions]]
+id = "open"
+title = "Toggle dashboard"
+description = "Open the Personal/Work dashboard popup, or close it"
+contexts = ["global", "workspace", "pane"]
+command = ["python3", "dashboard.py", "open"]
