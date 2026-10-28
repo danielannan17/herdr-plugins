@@ -9,7 +9,7 @@ def ws(n, label=None, focused=False, tabs=1):
     return Workspace(id=f"w{n}", label=label or f"space{n}", number=n, focused=focused, tab_count=tabs)
 
 
-def lines(state, rows=7, cols=54):
+def lines(state, rows=8, cols=54):
     return [render.strip_sgr(x) for x in render.render(state, rows, cols)]
 
 
@@ -23,17 +23,17 @@ class RenderTests(unittest.TestCase):
     def test_shows_current_workspace_and_input(self):
         state = logic.initial_state([ws(1, "alpha"), ws(2, "beta", focused=True, tabs=3)])
         out = lines(state)
-        self.assertEqual(len(out), 7)
+        self.assertEqual(len(out), 8)
         self.assertIn("Workspace: beta", out[1])
         self.assertIn("[⌄]", out[1])
-        self.assertIn("Tab name:", out[2])
-        self.assertIn("default: 4", out[2])
+        self.assertIn("Tab name:", out[3])
+        self.assertIn("default: 4", out[3])
         self.assertIn("Enter to create", out[-1])
 
     def test_typed_text_replaces_default_hint(self):
         state = press(logic.initial_state([ws(1, focused=True)]), *"api")
-        self.assertIn("Tab name: api", lines(state)[2])
-        self.assertNotIn("default:", lines(state)[2])
+        self.assertIn("Tab name: api", lines(state)[3])
+        self.assertNotIn("default:", lines(state)[3])
 
     def test_dropdown_marks_destination_and_active_workspace(self):
         state = logic.initial_state([ws(1, "alpha"), ws(2, "beta", focused=True), ws(3, "gamma")])
@@ -51,52 +51,72 @@ class RenderTests(unittest.TestCase):
         out = lines(state)
         self.assertTrue(any("space20" in line for line in out))
         self.assertFalse(any(re.search(r"\bspace1\b", line) for line in out[2:]))
-        self.assertIn("↑ 16 more", out[-1])
+        self.assertIn("↑ 15 more", out[-1])
         self.assertIn("1-9 select", out[-1])
 
     def test_every_row_fits_the_width(self):
         wss = [ws(i, "a very long workspace label " * 4, focused=(i == 1)) for i in range(1, 6)]
         state = press(logic.initial_state(wss), *"x" * 70)
         for st in (state, press(state, "alt+down")):
-            for line in render.render(st, 7, 54):
+            for line in render.render(st, 8, 54):
                 self.assertLessEqual(render.text_width(line), 54)
 
-    def test_four_workspaces_fill_the_list_exactly(self):
-        wss = [ws(i, f"space{i}", focused=(i == 2)) for i in range(1, 5)]
+    def test_five_workspaces_fill_the_list_exactly(self):
+        wss = [ws(i, f"space{i}", focused=(i == 2)) for i in range(1, 6)]
         out = lines(press(logic.initial_state(wss), "alt+down"))
         self.assertEqual(out[0], "")
         self.assertIn("Workspace:", out[1])
-        for i in range(4):
+        for i in range(5):
             self.assertIn(f"space{i + 1}", out[2 + i])
-        self.assertIn("1-9 select", out[6])
-        self.assertNotIn("more", out[6])
+        self.assertIn("1-9 select", out[7])
+        self.assertNotIn("more", out[7])
 
     def test_hidden_items_lead_the_hint_and_the_hint_is_trimmed_to_fit(self):
         wss = [ws(i, f"space{i}", focused=(i == 1)) for i in range(1, 10)]
         out = lines(press(logic.initial_state(wss), "alt+down"))
-        self.assertTrue(out[6].lstrip().startswith("↓ 5 more · 1-9 select"), out[6])
+        self.assertTrue(out[7].lstrip().startswith("↓ 4 more · 1-9 select"), out[7])
         both = lines(press(logic.initial_state(wss), "alt+down", *["down"] * 4))
-        self.assertTrue(both[6].lstrip().startswith("↑ 2 more · ↓ 3 more · 1-9 select"), both[6])
-        self.assertLessEqual(render.text_width(both[6]), 54)
+        self.assertTrue(both[7].lstrip().startswith("↑ 2 more · ↓ 2 more · 1-9 select"), both[7])
+        self.assertLessEqual(render.text_width(both[7]), 54)
 
     def test_closed_layout_has_nothing_between_error_and_hint(self):
         state = logic.on_create_failed(logic.initial_state([ws(1, focused=True)]), "nope")
         out = lines(state)
         self.assertEqual(out[0], "")
         self.assertIn("Workspace:", out[1])
-        self.assertIn("Tab name:", out[2])
-        self.assertEqual(out[3], "")
-        self.assertIn("nope", out[5])
-        self.assertIn("Enter to create", out[6])
+        self.assertIn("Shell:", out[2])
+        self.assertIn("Tab name:", out[3])
+        self.assertEqual(out[4], "")
+        self.assertIn("nope", out[6])
+        self.assertIn("Enter to create", out[7])
         long = logic.on_create_failed(logic.initial_state([ws(1, focused=True)]), "x" * 40 + " " + "y" * 40)
         out = lines(long)
-        self.assertEqual(out[3], "")
-        self.assertTrue(out[4].strip() and out[5].strip())
-        self.assertIn("Enter to create", out[6])
+        self.assertEqual(out[4], "")
+        self.assertTrue(out[5].strip() and out[6].strip())
+        self.assertIn("Enter to create", out[7])
 
     def test_error_is_shown(self):
         state = logic.on_create_failed(logic.initial_state([ws(1, focused=True)]), "nope")
         self.assertTrue(any("nope" in line for line in lines(state)))
+
+    def test_shell_row_shows_the_chosen_shell(self):
+        shells = (logic.Shell("Claude", "c"), logic.Shell("zsh", None))
+        state = logic.initial_state([ws(1, focused=True)], shells=shells)
+        self.assertEqual(lines(state)[2].strip(), "Shell: Claude")
+        self.assertEqual(lines(press(state, "shift+tab"))[2].strip(), "Shell: zsh")
+
+    def test_hint_names_shift_tab_and_fits_the_popup(self):
+        out = lines(logic.initial_state([ws(1, focused=True)]))
+        self.assertIn("Shift+Tab shell", out[-1])
+        self.assertLessEqual(render.text_width(out[-1]), 54)
+
+    def test_created_phase_offers_only_closing(self):
+        shells = (logic.Shell("Claude", "c"),)
+        state = logic.initial_state([ws(1, focused=True)], shells=shells)
+        state = logic.on_run_failed(state, "boom")
+        out = lines(state)
+        self.assertIn("Tab created", "\n".join(out))
+        self.assertIn("Enter or Esc to close", out[-1])
 
     def test_creating_status(self):
         state = press(logic.initial_state([ws(1, focused=True)]), "enter")

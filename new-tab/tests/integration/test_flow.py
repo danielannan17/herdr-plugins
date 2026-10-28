@@ -104,13 +104,13 @@ class KeybindingTests(FlowCase):
         self.assertIn("Workspace: beta", self.client.text())
         self.assertEqual(len(self.herdr.tabs(self.ids["beta"])), 1)
 
-    def test_manifest_height_gives_seven_inner_rows_and_three_workspaces_fit(self):
+    def test_manifest_height_gives_eight_inner_rows_and_three_workspaces_fit(self):
         self.client.send(PREFIX + "c")
         self.assertTrue(self.client.wait_for("Enter to create"))
         rows = self.client.text().split("\n")
         top = next(i for i, r in enumerate(rows) if "┌Create New Tab" in r)
         bottom = next(i for i, r in enumerate(rows) if i > top and "└" in r)
-        self.assertEqual(bottom - top - 1, 7)
+        self.assertEqual(bottom - top - 1, 8)
         self.assertIn("Enter to create", rows[bottom - 1])
         self.client.send(ALT_DOWN)
         self.assertTrue(self.client.wait_for("1-9 select"))

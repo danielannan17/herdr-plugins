@@ -17,8 +17,8 @@ command = ["herdr", "plugin", "pane", "open", "--plugin", "danielannan17.new-tab
 [[panes]]
 id = "new-tab"
 title = "Create New Tab"
-description = "Name the tab and choose its workspace"
+description = "Name the tab and choose its workspace and shell"
 placement = "popup"
 width = 56
-height = 9
+height = 10
 command = ["python3", "main.py"]

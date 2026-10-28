@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 
 from newtab import logic
 from newtab.logic import Create, Workspace, label_for
@@ -43,6 +44,92 @@ class DestinationTests(unittest.TestCase):
         self.assertEqual(first.dest_id, "w3")
         second = logic.initial_state(spaces(3, focused=2))
         self.assertEqual(second.dest_id, "w2")
+
+
+CLAUDE = logic.Shell("Claude", "c")
+ZSH = logic.Shell("zsh", None)
+
+
+class ShellConfigTests(unittest.TestCase):
+    def test_entries_are_read_in_order_and_a_missing_command_means_plain(self):
+        text = '[[shell]]\nname = "Claude"\ncommand = "c"\n\n[[shell]]\nname = "zsh"\n'
+        self.assertEqual(logic.parse_shells(text), ((CLAUDE, ZSH), None))
+
+    def test_blank_command_is_plain(self):
+        shells, error = logic.parse_shells('[[shell]]\nname = "zsh"\ncommand = "  "\n')
+        self.assertEqual(shells, (ZSH,))
+        self.assertIsNone(error)
+
+    def test_invalid_toml_falls_back_with_an_error(self):
+        shells, error = logic.parse_shells("[[shell")
+        self.assertEqual(shells, (logic.PLAIN_SHELL,))
+        self.assertTrue(error.startswith("shells.toml:"), error)
+
+    def test_no_entries_falls_back_with_an_error(self):
+        self.assertEqual(logic.parse_shells("")[0], (logic.PLAIN_SHELL,))
+        self.assertIn("no [[shell]]", logic.parse_shells("")[1])
+
+    def test_entry_without_a_name_falls_back_with_an_error(self):
+        shells, error = logic.parse_shells('[[shell]]\ncommand = "c"\n')
+        self.assertEqual(shells, (logic.PLAIN_SHELL,))
+        self.assertIn("shell 1 needs a name", error)
+
+    def test_non_text_command_falls_back_with_an_error(self):
+        shells, error = logic.parse_shells('[[shell]]\nname = "x"\ncommand = 3\n')
+        self.assertEqual(shells, (logic.PLAIN_SHELL,))
+        self.assertIn("command must be text", error)
+
+
+class ShellConfigWithoutTomllibTests(unittest.TestCase):
+    def test_old_python_falls_back_with_an_error(self):
+        with unittest.mock.patch.object(logic, "tomllib", None):
+            shells, error = logic.parse_shells('[[shell]]\nname = "x"\n')
+        self.assertEqual(shells, (logic.PLAIN_SHELL,))
+        self.assertIn("Python 3.11", error)
+
+
+class ShellPickerTests(unittest.TestCase):
+    def state(self, shells=(CLAUDE, ZSH)):
+        return logic.initial_state(spaces(2), shells=shells)
+
+    def test_first_shell_is_the_default(self):
+        self.assertEqual(logic.current_shell(self.state()), CLAUDE)
+
+    def test_shift_tab_cycles_and_wraps(self):
+        state = self.state()
+        state, effect = press(state, "shift+tab")
+        self.assertIsNone(effect)
+        self.assertEqual(logic.current_shell(state), ZSH)
+        state, _ = press(state, "shift+tab")
+        self.assertEqual(logic.current_shell(state), CLAUDE)
+
+    def test_shift_tab_with_one_shell_changes_nothing(self):
+        state = self.state((ZSH,))
+        self.assertEqual(press(state, "shift+tab")[0], state)
+
+    def test_shift_tab_does_not_open_the_workspace_list(self):
+        self.assertFalse(press(self.state(), "shift+tab")[0].dropdown)
+
+    def test_shift_tab_is_ignored_while_the_list_is_open(self):
+        state, _ = press(self.state(), "alt+down", "shift+tab")
+        self.assertTrue(state.dropdown)
+        self.assertEqual(logic.current_shell(state), CLAUDE)
+
+    def test_submit_carries_the_chosen_shells_command(self):
+        state, _ = press(self.state(), "enter")
+        self.assertEqual(logic.on_listing(state, state.workspaces)[1], Create("w2", None, "c"))
+        state, _ = press(self.state(), "shift+tab", "enter")
+        self.assertEqual(logic.on_listing(state, state.workspaces)[1], Create("w2", None, None))
+
+    def test_failed_run_keeps_the_tab_and_offers_only_closing(self):
+        state, _ = press(self.state(), "enter")
+        state = logic.on_run_failed(state, "boom")
+        self.assertIn("Tab created", state.error)
+        self.assertIn("'c'", state.error)
+        self.assertIn("boom", state.error)
+        self.assertEqual(press(state, "enter")[1], logic.EFFECT_CANCEL)
+        self.assertEqual(press(state, "esc")[1], logic.EFFECT_CANCEL)
+        self.assertEqual(press(state, "x"), (state, None))
 
 
 class CreateTests(unittest.TestCase):

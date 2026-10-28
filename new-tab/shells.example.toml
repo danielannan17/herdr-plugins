@@ -1,0 +1,9 @@
+# Shells offered by the New Tab popup (Shift+Tab cycles). The first entry is the
+# default. An entry with a `command` types it into the new tab's interactive
+# shell, so aliases work; without one the plain shell is left as it is.
+[[shell]]
+name = "Claude"
+command = "c"
+
+[[shell]]
+name = "zsh"

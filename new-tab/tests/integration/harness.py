@@ -15,6 +15,7 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import threading
@@ -231,7 +232,8 @@ class IsolatedHerdr:
             os.makedirs(os.path.join(self.root, d))
         self.config_path = os.path.join(self.root, "xdg", "herdr", "config.toml")
         self.env = {
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+            # The running interpreter first: the system python3 predates tomllib.
+            "PATH": os.path.dirname(sys.executable) + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
             "HOME": os.path.join(self.root, "home"),
             "XDG_CONFIG_HOME": os.path.join(self.root, "xdg"),
             "XDG_STATE_HOME": os.path.join(self.root, "home", ".state"),

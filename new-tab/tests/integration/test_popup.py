@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import unittest
@@ -13,11 +14,11 @@ ESC = "\x1b"
 ENTER = "\r"
 
 
-class FailingTabCreateProxy:
-    """Forwards the Herdr API socket, except that tab.create fails while `fail` is set."""
+class FailingMethodProxy:
+    """Forwards the Herdr API socket, except that `method` fails while `fail` is set."""
 
-    def __init__(self, path, upstream):
-        self.path, self.upstream, self.fail = path, upstream, True
+    def __init__(self, path, upstream, method="tab.create"):
+        self.path, self.upstream, self.method, self.fail = path, upstream, method, True
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(path)
         self.listener.listen(8)
@@ -36,8 +37,8 @@ class FailingTabCreateProxy:
         with conn:
             line = conn.makefile("rb").readline()
             request = json.loads(line)
-            if self.fail and request.get("method") == "tab.create":
-                reply = {"id": request["id"], "error": {"code": "tab_create_failed", "message": "no pty available"}}
+            if self.fail and request.get("method") == self.method:
+                reply = {"id": request["id"], "error": {"code": "failed", "message": "no pty available"}}
                 conn.sendall((json.dumps(reply) + "\n").encode())
                 return
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as up:
@@ -57,6 +58,9 @@ class PopupCase(unittest.TestCase):
     def setUpClass(cls):
         cls.herdr = IsolatedHerdr()
         cls.herdr.write_config("onboarding = false\n")
+        cls.herdr.env["SHELL"] = "/bin/zsh"
+        with open(os.path.join(cls.herdr.env["HOME"], ".zshrc"), "w") as f:
+            f.write("alias c='echo ALIAS_RAN'\nPS1='READY> '\n")
         cls.herdr.start()
 
     @classmethod
@@ -82,12 +86,34 @@ class PopupCase(unittest.TestCase):
         env = dict(self.herdr.env)
         env["HERDR_SOCKET_PATH"] = self.herdr.socket_path
         env.update(env_extra or {})
-        self.popup = Pty(["python3", os.path.join(PLUGIN_ROOT, "main.py")], env, rows=7, cols=54, cwd=PLUGIN_ROOT)
+        self.popup = Pty([sys.executable, os.path.join(PLUGIN_ROOT, "main.py")], env, rows=8, cols=54, cwd=PLUGIN_ROOT)
         self.assertTrue(self.popup.wait_for(wait_for), self.popup.text())
         return self.popup
 
     def tab_labels(self, workspace_id):
         return [t["label"] for t in self.herdr.tabs(workspace_id)]
+
+    def newest_pane_id(self, workspace_id):
+        tab_id = self.herdr.tabs(workspace_id)[-1]["tab_id"]
+        panes = self.herdr.api("pane", "list", "--workspace", workspace_id)["panes"]
+        return next(x["pane_id"] for x in panes if x["tab_id"] == tab_id)
+
+    def pane_text(self, pane_id):
+        return self.herdr.run("pane", "read", pane_id, "--source", "recent-unwrapped", "--lines", "20").stdout
+
+    def wait_pane_text(self, pane_id, needle, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if needle in self.pane_text(pane_id):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def write_shells(self, text):
+        path = os.path.join(self.herdr.root, "shells.toml")
+        with open(path, "w") as f:
+            f.write(text)
+        return {"NEW_TAB_SHELLS": path}
 
 
 class CreateTests(PopupCase):
@@ -184,6 +210,80 @@ class CreateTests(PopupCase):
         new_tab = self.herdr.tabs(b)[-1]["tab_id"]
         new_pane = [x for x in panes if x["tab_id"] == new_tab][0]
         self.assertEqual(new_pane["cwd"], "/private/var")
+
+
+SHELLS = '''[[shell]]
+name = "Claude"
+command = "c"
+
+[[shell]]
+name = "zsh"
+'''
+SHIFT_TAB = "\x1b[Z"
+
+
+class ShellTests(PopupCase):
+    def test_first_shell_is_the_default_and_its_command_runs_in_the_interactive_shell(self):
+        ids = self.workspaces_labeled("alpha", focus="alpha")
+        p = self.open_popup(self.write_shells(SHELLS))
+        self.assertIn("Shell: Claude", p.text())
+        p.send(ENTER)
+        self.assertEqual(p.poll_exit(), 0)
+        # `c` is a shell alias, so only the interactive shell can have run it.
+        self.assertTrue(self.wait_pane_text(self.newest_pane_id(ids["alpha"]), "ALIAS_RAN"))
+
+    def test_shift_tab_picks_the_next_shell_and_a_plain_shell_gets_no_command(self):
+        ids = self.workspaces_labeled("alpha", focus="alpha")
+        p = self.open_popup(self.write_shells(SHELLS))
+        p.send(SHIFT_TAB)
+        self.assertTrue(p.wait_for("Shell: zsh"), p.text())
+        self.assertIn("Shift+Tab shell", p.text())
+        p.send(ENTER)
+        self.assertEqual(p.poll_exit(), 0)
+        pane = self.newest_pane_id(ids["alpha"])
+        self.assertTrue(self.wait_pane_text(pane, "READY>"))
+        time.sleep(0.3)
+        self.assertNotIn("ALIAS_RAN", self.pane_text(pane))
+
+    def test_shift_tab_wraps_back_to_the_first_shell(self):
+        self.workspaces_labeled("alpha", focus="alpha")
+        p = self.open_popup(self.write_shells(SHELLS))
+        p.send(SHIFT_TAB)
+        self.assertTrue(p.wait_for("Shell: zsh"), p.text())
+        p.send(SHIFT_TAB)
+        self.assertTrue(p.wait_for("Shell: Claude"), p.text())
+
+    def test_missing_config_shows_the_error_and_still_creates_a_plain_tab(self):
+        ids = self.workspaces_labeled("alpha", focus="alpha")
+        p = self.open_popup({"NEW_TAB_SHELLS": os.path.join(self.herdr.root, "absent.toml")})
+        self.assertTrue(p.wait_for("shells.toml:"), p.text())
+        self.assertIn("Shell: shell", p.text())
+        p.send(ENTER)
+        self.assertEqual(p.poll_exit(), 0)
+        self.assertEqual(len(self.herdr.tabs(ids["alpha"])), 2)
+
+    def test_invalid_config_shows_the_error_instead_of_crashing(self):
+        self.workspaces_labeled("alpha", focus="alpha")
+        p = self.open_popup(self.write_shells("[[shell"))
+        self.assertTrue(p.wait_for("shells.toml:"), p.text())
+        self.assertIsNone(p.poll_exit(0.3))
+
+    def test_failed_command_says_the_tab_exists_and_enter_closes_without_a_second_tab(self):
+        ids = self.workspaces_labeled("alpha", focus="alpha")
+        proxy = FailingMethodProxy(os.path.join(self.herdr.root, "p.sock"), self.herdr.socket_path, "pane.send_input")
+        self.addCleanup(proxy.stop)
+        env = self.write_shells(SHELLS)
+        env["HERDR_SOCKET_PATH"] = proxy.path
+        p = self.open_popup(env)
+        p.send(ENTER)
+        self.assertTrue(p.wait_for("Tab created"), p.text())
+        self.assertIn("no pty", p.text())
+        self.assertIn("Enter or Esc to close", p.text())
+        self.assertIsNone(p.poll_exit(0.4))
+        self.assertEqual(len(self.herdr.tabs(ids["alpha"])), 2)
+        p.send(ENTER)
+        self.assertEqual(p.poll_exit(), 0)
+        self.assertEqual(len(self.herdr.tabs(ids["alpha"])), 2)
 
 
 class CancelTests(PopupCase):
@@ -285,7 +385,7 @@ class FailureTests(PopupCase):
 
     def test_create_failure_keeps_dialog_open_with_the_error(self):
         ids = self.workspaces_labeled("alpha", focus="alpha")
-        proxy = FailingTabCreateProxy(os.path.join(self.herdr.root, "p.sock"), self.herdr.socket_path)
+        proxy = FailingMethodProxy(os.path.join(self.herdr.root, "p.sock"), self.herdr.socket_path)
         self.addCleanup(proxy.stop)
         p = self.open_popup({"HERDR_SOCKET_PATH": proxy.path})
         p.send("keepme\r")
@@ -321,7 +421,7 @@ class DuplicateGuardTests(PopupCase):
         ids = self.workspaces_labeled("alpha", focus="alpha")
         env = dict(self.herdr.env)
         env["HERDR_SOCKET_PATH"] = self.herdr.socket_path
-        self.popup = Pty(["python3", os.path.join(PLUGIN_ROOT, "main.py")], env, rows=7, cols=54, cwd=PLUGIN_ROOT)
+        self.popup = Pty([sys.executable, os.path.join(PLUGIN_ROOT, "main.py")], env, rows=8, cols=54, cwd=PLUGIN_ROOT)
         self.popup.send("\r\r")
         self.assertEqual(self.popup.poll_exit(8), 0)
         time.sleep(0.3)

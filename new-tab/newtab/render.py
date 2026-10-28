@@ -6,7 +6,7 @@ import re
 import textwrap
 import unicodedata
 
-from .logic import State, active_workspace, default_name, destination
+from .logic import CREATED, CREATING, State, active_workspace, current_shell, default_name, destination
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -17,7 +17,8 @@ GREEN = "\x1b[32m"
 
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 
-HINT = "Enter to create · Alt+↓ workspace · Esc cancel"
+HINT = "Enter to create · Alt+↓ workspace · Shift+Tab shell"
+CREATED_HINT = "Enter or Esc to close"
 DROPDOWN_HINT_PARTS = ["1-9 select", "↑↓ move", "Enter choose", "Esc close"]
 CHECK = "✓"
 CARET_CLOSED = "⌄"
@@ -94,6 +95,13 @@ def _name_row(state: State, cols: int) -> str:
     return f" {prefix}{body}{right}"
 
 
+def _shell_row(state: State, cols: int) -> str:
+    prefix = "Shell: "
+    shell = current_shell(state)
+    shown = fit(shell.name, cols - 2 - text_width(prefix))
+    return f" {prefix}{BOLD}{shown}{RESET}"
+
+
 def window_start(highlight: int, total: int, visible: int) -> int:
     if total <= visible:
         return 0
@@ -135,12 +143,13 @@ def _dropdown_hint(above: int, below: int, cols: int) -> str:
 
 
 def render(state: State, rows: int, cols: int) -> list[str]:
-    """Return exactly `rows` lines (at least 7).
+    """Return exactly `rows` lines (at least 8).
 
     Row 0 is padding and row 1 the workspace row in both modes. Closed: the
-    name row, a blank, up to two error lines, then the hint on the last row.
-    Open: the list fills every row between the workspace row and the hint."""
-    rows = max(rows, 7)
+    shell row, the name row, a blank, up to two error lines, then the hint on
+    the last row. Open: the list fills every row between the workspace row and
+    the hint."""
+    rows = max(rows, 8)
     out: list[str] = [""] * rows
     out[1] = _workspace_row(state, cols)
     if state.dropdown:
@@ -152,7 +161,8 @@ def render(state: State, rows: int, cols: int) -> list[str]:
         hint = _dropdown_hint(start, max(0, total - (start + visible)), cols)
         out[rows - 1] = f" {DIM}{hint}{RESET}"
         return out
-    out[2] = _name_row(state, cols)
+    out[2] = _shell_row(state, cols)
+    out[3] = _name_row(state, cols)
     if state.error:
         wrapped = textwrap.wrap(state.error, max(10, cols - 2)) or [state.error]
         lines = wrapped[:2]
@@ -161,6 +171,6 @@ def render(state: State, rows: int, cols: int) -> list[str]:
         first = rows - 1 - len(lines)
         for k, line in enumerate(lines):
             out[first + k] = f" {RED}{line}{RESET}"
-    status = "Creating…" if state.phase == "creating" else HINT
+    status = {CREATING: "Creating…", CREATED: CREATED_HINT}.get(state.phase, HINT)
     out[rows - 1] = f" {DIM}{fit(status, cols - 2)}{RESET}"
     return out

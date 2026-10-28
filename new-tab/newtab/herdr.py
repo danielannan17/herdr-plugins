@@ -68,13 +68,24 @@ def list_workspaces() -> list[Workspace]:
     ]
 
 
-def create_tab(workspace_id: str, label: str | None) -> None:
-    """Create and focus a tab. Never sends cwd or env: Herdr resolves the
-    working directory from the destination workspace's focused pane."""
+def create_tab(workspace_id: str, label: str | None) -> str:
+    """Create and focus a tab; returns its root pane id. Never sends cwd or env:
+    Herdr resolves the working directory from the destination workspace's
+    focused pane."""
     params = {"workspace_id": workspace_id, "focus": True}
     if label is not None:
         params["label"] = label
-    call("tab.create", params)
+    result = call("tab.create", params)
+    try:
+        return result["root_pane"]["pane_id"]
+    except (KeyError, TypeError):
+        raise HerdrError("Herdr did not return the new pane")
+
+
+def run_command(pane_id: str, command: str) -> None:
+    """Type `command` and Enter into the pane's interactive shell, as `herdr pane
+    run` does, so aliases and functions resolve."""
+    call("pane.send_input", {"pane_id": pane_id, "text": command, "keys": ["enter"]})
 
 
 def context_workspace_id() -> str | None:

@@ -6,7 +6,7 @@ import select
 import termios
 import tty
 
-from . import herdr, logic, render
+from . import herdr, logic, render, shells
 from .keys import KeyParser
 
 ESC_TIMEOUT = 0.05
@@ -40,9 +40,14 @@ def _submit(state: logic.State, out_fd: int, tty_fd: int) -> logic.State:
     if create is None:
         return state
     try:
-        herdr.create_tab(create.workspace_id, create.label)
+        pane_id = herdr.create_tab(create.workspace_id, create.label)
     except herdr.HerdrError as err:
         return logic.on_create_failed(state, str(err))
+    if create.command:
+        try:
+            herdr.run_command(pane_id, create.command)
+        except herdr.HerdrError as err:
+            return logic.on_run_failed(state, str(err))
     return logic.on_create_ok(state)
 
 
@@ -57,10 +62,15 @@ def run(in_fd: int = 0, out_fd: int = 1) -> int:
 
 
 def _initial_state() -> logic.State:
+    shell_list, shells_error = shells.load()
     try:
-        return logic.initial_state(herdr.list_workspaces(), herdr.context_workspace_id())
+        state = logic.initial_state(herdr.list_workspaces(), herdr.context_workspace_id(), shell_list)
     except herdr.HerdrError as err:
-        return logic.State(workspaces=(), dest_id=None, error=f"Could not read workspaces: {err}. Esc to close.")
+        return logic.State(
+            workspaces=(), dest_id=None, shells=shell_list,
+            error=f"Could not read workspaces: {err}. Esc to close.",
+        )
+    return state._replace(error=shells_error)
 
 
 def _loop(in_fd: int, out_fd: int) -> int:

@@ -6,14 +6,16 @@ A workspace-aware **Create New Tab** popup for [Herdr](https://herdr.dev) 0.9+. 
 ┌Create New Tab──────────────────────────────────────────┐
 │                                                        │
 │ Workspace: api                                    [⌄]  │
+│ Shell: Claude                                          │
 │ Tab name: █                                default: 3  │
 │                                                        │
 │                                                        │
-│ Enter to create · Alt+↓ workspace · Esc cancel         │
+│                                                        │
+│ Enter to create · Alt+↓ workspace · Shift+Tab shell    │
 └────────────────────────────────────────────────────────┘
 ```
 
-`Ctrl+B` `C` `Enter` creates a tab in the current workspace, as before. `Alt+↓` opens a numbered workspace list so the tab can go to any other workspace without leaving the keyboard.
+`Ctrl+B` `C` `Enter` creates a tab in the current workspace, as before. `Alt+↓` opens a numbered workspace list so the tab can go to any other workspace without leaving the keyboard. `Shift+Tab` picks which shell the tab starts, from the list in `shells.toml`.
 
 ## Keys
 
@@ -22,6 +24,7 @@ A workspace-aware **Create New Tab** popup for [Herdr](https://herdr.dev) 0.9+. 
 | typing | edits the tab name (digits are name text unless the list is open) |
 | `Enter` | creates the tab in the chosen workspace, switches Herdr to it, closes the popup |
 | `Alt+↓` (or `Tab`) | opens the workspace list |
+| `Shift+Tab` | cycles to the next shell (wraps) |
 | `Esc` | cancels, nothing is created |
 | list: `1`-`9` | selects that workspace and returns to the name field |
 | list: `↑` `↓` `Home` `End` | moves the highlight (wraps, scrolls past nine workspaces) |
@@ -30,6 +33,23 @@ A workspace-aware **Create New Tab** popup for [Herdr](https://herdr.dev) 0.9+. 
 | name field: `←` `→` `Home` `End` `Ctrl+U` `Ctrl+W` `Backspace` `Delete` | edit |
 
 In the list, `✓` marks the destination and `· active` marks the workspace Herdr is showing, so the two are distinguishable when they differ. Choosing a workspace changes only the destination; Herdr does not switch until the tab is created.
+
+## Shells
+
+The popup offers the shells listed in `shells.toml` in the plugin's Herdr config folder (`herdr plugin config-dir danielannan17.new-tab` prints it; `~/.config/herdr/plugins/config/danielannan17.new-tab/` by default). The first entry is the default. The file is created the first time the popup opens, as a copy of `shells.example.toml` from this plugin. Edit that copy to change your shells; it is never overwritten, and updating the plugin leaves it alone.
+
+```toml
+[[shell]]
+name = "Claude"
+command = "c"
+
+[[shell]]
+name = "zsh"
+```
+
+A `command` is typed, followed by `Enter`, into the new tab's interactive shell (the API call behind `herdr pane run`), so aliases and functions such as `c` resolve. An entry without a `command` leaves the plain shell alone. The file is read each time the popup opens. If the file is unreadable or invalid, the popup shows the reason on its error line and offers one plain shell, so a tab can still be created. If the file cannot be created, the popup shows that on its error line and offers the shells from the example for that opening. `NEW_TAB_SHELLS` points the plugin at a different file and skips the config folder.
+
+If typing the command fails, the tab already exists: the popup says so and only `Enter` or `Esc` (close) are accepted, so a second tab cannot be created by accident. Success is acknowledged when Herdr accepts the input, not when the command finishes; the command may still fail inside the tab.
 
 ## Behaviour that mirrors Herdr's own dialog
 
@@ -41,7 +61,7 @@ In the list, `✓` marks the destination and `· active` marks the workspace Her
 
 ## Install
 
-Requires Herdr 0.9.0 or newer and `python3` (3.8+, standard library only) on the `PATH` that Herdr runs plugins with.
+Requires Herdr 0.9.0 or newer and `python3` (3.11+ for `tomllib`, standard library only; on an older interpreter the popup still works but ignores `shells.toml` and says so) on the `PATH` that Herdr runs plugins with.
 
 ```bash
 herdr plugin install danielannan17/herdr-plugins/new-tab
@@ -90,6 +110,8 @@ Layout of the code:
 - `newtab/keys.py` terminal bytes to key names (pure)
 - `newtab/render.py` state to screen rows (pure)
 - `newtab/herdr.py` the Herdr API socket
+- `newtab/shells.py` finds, first-run creates and reads `shells.toml`
+- `shells.example.toml` the shipped default shells
 - `newtab/app.py` the terminal loop
 
 The action asks Herdr for the popup directly (`herdr plugin pane open`), so no interpreter starts before the popup does. The API socket is used instead of the CLI because the CLI's parser cannot carry a tab name that starts with `-`.
@@ -97,7 +119,7 @@ The action asks Herdr for the popup directly (`herdr plugin pane open`), so no i
 ## Tests
 
 ```bash
-python3 -m unittest tests.test_logic tests.test_keys tests.test_render
+python3 -m unittest tests.test_logic tests.test_keys tests.test_render tests.test_shells
 python3 -W ignore -m unittest tests.integration.test_popup tests.integration.test_flow
 ```
 
@@ -106,7 +128,7 @@ The integration tests start a private Herdr server (own config dir and sockets u
 ## Limitations
 
 - Workspaces beyond the ninth are reachable with the arrow keys only; `1`-`9` select the first nine.
-- The popup has a fixed size (56 by 9 cells, seven inner rows). With many workspaces the list scrolls.
+- The popup has a fixed size (56 by 10 cells, eight inner rows). With many workspaces the list scrolls.
 - `Esc` and `Alt+↓` are told apart by a 50 ms timeout; over a very slow remote link a split `Alt+↓` could read as `Esc`. `Tab` opens the list too.
 - The popup opens about 100 ms after `C` (Herdr runs the action, then starts the program). An `Enter` pressed sooner than roughly 80 ms after `C` reaches the pane underneath instead of the popup. Typing at normal speed does not do this; Herdr's own dialog, now on `Ctrl+B` `Shift+C`, opens in the same frame.
 - Herdr popups are modal and singleton: nothing else can open while this one is up, and opening it while Settings or copy mode is active fails with `ui_busy`.
