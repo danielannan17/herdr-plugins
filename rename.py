@@ -116,6 +116,12 @@ class Stamp(BaseModel):
     tokens_at_naming: int | None = None
     # label_set is the title-derived stand-in, not a model-generated label.
     fallback: bool = False
+    # What this plugin last wrote to the pane's tab, and whether the tab turned
+    # out to carry a name the user chose (never retried).
+    tab_label_set: str | None = None
+    tab_manual: bool = False
+    # The terminal title at the last run: herdr-bar titles tabs from it.
+    title_seen: str | None = None
 
 
 class Evidence(BaseModel):
@@ -738,6 +744,82 @@ def apply_label(pane_id: str, label: str, workspace_label: str) -> str | None:
     return None
 
 
+def tab_fields(stamp: Stamp | None) -> dict:
+    return {
+        "tab_label_set": stamp.tab_label_set if stamp else None,
+        "tab_manual": stamp.tab_manual if stamp else False,
+    }
+
+
+def sync_tab(agent_info: dict, label: str, title: str | None, prior: Stamp | None) -> dict:
+    """Give the agent's tab the pane label when the tab is not named by the user.
+
+    Returns the stamp fields describing the tab afterwards. A tab holding several
+    agents is left alone and not marked, so it is reconsidered if it becomes single.
+    """
+    fields = {**tab_fields(prior), "title_seen": title}
+    tab_id = agent_info.get("tab_id")
+    if not label or not tab_id or fields["tab_manual"] or fields["tab_label_set"] == label:
+        return fields
+    tabs = (herdr("tab", "list") or {}).get("tabs")
+    agents = (herdr("agent", "list") or {}).get("agents")
+    if tabs is None or agents is None:
+        return fields
+    if sum(1 for agent in agents if agent.get("tab_id") == tab_id) != 1:
+        return fields
+    tab = next((t for t in tabs if t.get("tab_id") == tab_id), None)
+    if tab is None:
+        return fields
+    siblings = [t.get("tab_id") for t in tabs if t.get("workspace_id") == tab.get("workspace_id")]
+    current = (tab.get("label") or "").strip()
+    known_titles = {
+        normalise_title(text) for text in (title, prior.title_seen if prior else None) if text
+    } - {""}
+    unnamed = {"", str(siblings.index(tab_id) + 1), str(tab.get("number"))}
+    ours = (
+        current in unnamed
+        or current == fields["tab_label_set"]
+        or normalise_title(current) in known_titles
+    )
+    if not ours:
+        fields["tab_manual"] = True
+        log(f"{tab_id} keeps its own name {current!r}")
+        return fields
+    if current != label:
+        result = herdr("tab", "rename", tab_id, label)
+        if not result or "error" in result:
+            log(f"tab label for {tab_id} failed: {str((result or {}).get('error'))[:160]}")
+            return fields
+        log(f"{tab_id} named {label!r}")
+    fields["tab_label_set"] = label
+    return fields
+
+
+def sync_pane_tab(pane_id: str, agent_info: dict, title: str | None, before: Stamp | None) -> None:
+    """Bring the tab in line with whatever label the pane's stamp now records."""
+    current = read_stamp(pane_id)
+    if current is None or current.manual or not current.label_set:
+        return
+    updated = current.model_copy(update=sync_tab(agent_info, current.label_set, title, before))
+    if updated != current:
+        write_stamp(pane_id, updated)
+
+
+def hand_back_tab(pane_id: str, stamp: Stamp | None) -> None:
+    """Undo our tab name, but only while the tab still shows it."""
+    if stamp is None or not stamp.tab_label_set:
+        return
+    tab_id = ((herdr("pane", "get", pane_id) or {}).get("pane") or {}).get("tab_id")
+    tabs = (herdr("tab", "list") or {}).get("tabs") or []
+    tab = next((t for t in tabs if t.get("tab_id") == tab_id), None)
+    if tab is None or (tab.get("label") or "").strip() != stamp.tab_label_set:
+        return
+    result = herdr("tab", "rename", tab_id, "")
+    if not result or "error" in result:
+        siblings = [t.get("tab_id") for t in tabs if t.get("workspace_id") == tab.get("workspace_id")]
+        herdr("tab", "rename", tab_id, str(siblings.index(tab_id) + 1))
+
+
 def pane_from_environment() -> tuple[str | None, str | None]:
     """Resolve which pane this run is about, and the event that triggered it."""
     event = os.environ.get("HERDR_PLUGIN_EVENT")
@@ -820,6 +902,7 @@ def run_check() -> int:
 
 
 def run_reset(pane_id: str) -> int:
+    hand_back_tab(pane_id, read_stamp(pane_id))
     herdr("agent", "rename", pane_id, "--clear")
     herdr("pane", "rename", pane_id, "")
     stamp_path(pane_id).unlink(missing_ok=True)
@@ -845,17 +928,18 @@ def rename_pane(pane_id: str, force: bool) -> int:
             label_set=live_label, name_set=agent_info.get("name"),
             title_hash=title_hash(evidence.title),
             agent_session_id=session, set_at=now, manual=True,
+            **tab_fields(stamp),
         ))
         log(f"{pane_id} adopted manual label {live_label!r}")
         return 0
-    if verdict != "rename":
+    if verdict == "rename":
+        outcome = request_real_label(pane_id, evidence, session, tokens, now)
+        if outcome == "failed":
+            set_fallback_label(pane_id, evidence, session, stamp, live_label, now)
+    elif verdict != "skip-unchanged":
         # The watcher polls every minute, so the steady state would drown the log.
-        if verdict != "skip-unchanged":
-            log(f"{pane_id} {verdict}")
-        return 0
-    outcome = request_real_label(pane_id, evidence, session, tokens, now)
-    if outcome == "failed":
-        set_fallback_label(pane_id, evidence, session, stamp, live_label, now)
+        log(f"{pane_id} {verdict}")
+    sync_pane_tab(pane_id, agent_info, evidence.title, stamp)
     return 0
 
 

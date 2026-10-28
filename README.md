@@ -18,7 +18,8 @@ before                        after
 ```
 
 Sibling plugin: [`herdr-tab-smart-rename`](https://github.com/iurysza/herdr-tab-smart-rename)
-names *tabs*. This one only ever writes *agent* names, so the two can run together.
+names *tabs* on its own; this one names agents and, as described under
+[Tab naming](#tab-naming), the tab they live in.
 
 ## Requirements
 
@@ -191,6 +192,20 @@ Names are kebab-case slugs (`review-auth-flow`) because herdr requires
 `herdr agent send review-auth-flow "..."` once one is set. The plugin caps names
 at 24 characters so the 26-column sidebar shows them whole.
 
+## Tab naming
+
+Tab auto-titlers such as herdr-bar skip any tab whose pane has a label, so a
+labelled agent would leave its tab as a bare number. Whenever the plugin applies
+a pane label (model or fallback), it also runs `herdr tab rename` with the same
+text, and keeps the two in step when the label changes.
+
+A tab is only renamed when it holds exactly one agent pane and its current name
+is not one you chose: empty, its default number (position in the workspace, or
+its `number`), what this plugin last wrote, or the agent's current or previous
+terminal title. Any other name is treated as manual, recorded, and never touched
+again. `reset-agent` renames the tab back (empty, else its position number) only
+if it still shows the plugin's name. `check-ai` never touches tabs.
+
 ## What gets sent, and where
 
 Naming needs context, so **the sanitised terminal title and a tail of recent
@@ -223,6 +238,6 @@ runs cannot lose each other's lines, and in
 uv run --with pytest --with httpx --with pydantic pytest tests/ -q
 ```
 
-97 tests over the pure functions and the rename flow — no network, no herdr and no real model call required. Design notes
+114 tests over the pure functions and the rename flow — no network, no herdr and no real model call required. Design notes
 and the empirically verified platform behaviour are in
 `docs/superpowers/specs/2026-07-24-herdr-agent-smart-rename-design.md`.
