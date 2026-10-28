@@ -31,26 +31,21 @@
 #   bare_keys true: Tab / Shift+Tab / Esc switch and close without Ctrl+B
 #             (default false; see [keys])
 
-# Disposable Camera -> gh board. `gh board` is a GitHub CLI extension
-# (https://github.com/uzimaru0000/gh-board); until it is installed the popup shows
-# "Executable not found" or gh's own error, and Tab still switches modes.
+# Disposable Camera -> gh board, a GitHub CLI extension
+# (gh extension install uzimaru0000/gh-board), opened on its GitHub Project.
 [workspaces.disposable-camera]
 command = ["gh", "board"]
-# To open its GitHub Project directly, add the flags `gh board --help` lists once the
-# extension is installed:
-# args = ["<flag>", "<value>"]
+args = ["--owner", "danielannan17", "12"]
 # path = "~/Projects/disposable-camera"
 
-[workspaces.cloud-config]
+[workspaces.claude-config]
 command = ["gh", "dash"]
 # Filter by repository with a gh-dash config file of your own:
-# args = ["--config", "~/.config/gh-dash/cloud-config.yml"]
-# label = ["cloud-config", "claude-config"]   # add the workspace's real label if it differs
+# args = ["--config", "~/.config/gh-dash/claude-config.yml"]
 
-[workspaces.post-planner]
+[workspaces.pulse-planner]
 command = ["gh", "dash"]
-# args = ["--config", "~/.config/gh-dash/post-planner.yml"]
-# label = ["post-planner", "pulse-planner"]
+# args = ["--config", "~/.config/gh-dash/pulse-planner.yml"]
 
 [workspaces.personal-agent-marketplace]
 command = ["gh", "dash"]

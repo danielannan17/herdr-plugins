@@ -61,7 +61,7 @@ A chord that arrives in a different encoding (`ESC [ Z`, kitty `CSI 9;2u`, xterm
 
 ## Behaviour
 
-- **Mode** is Personal or Work, saved globally (not per workspace) in the plugin's state directory. Open in Disposable Camera, switch to Personal, close, switch to Cloud Config, open: Personal is shown; `Ctrl+B Tab` shows Cloud Config's dashboard. The first ever mode is Work.
+- **Mode** is Personal or Work, saved globally (not per workspace) in the plugin's state directory. Open in Disposable Camera, switch to Personal, close, switch to Claude Config, open: Personal is shown; `Ctrl+B Tab` shows Claude Config's dashboard. The first ever mode is Work.
 - **Work** resolves the workspace at open time and again on every switch, restart and rename.
 - **Nothing is configured, or the workspace has no dashboard**: a box titled "Personal Dashboard" or "Work Dashboard" says so, with `Tab Switch to ...` and `Esc Close`. The popup always opens, the other mode stays one key away, and it never switches by itself.
 - **Missing executable, bad working directory, invalid config, a command that fails or exits unexpectedly**: the same box with the cause (the command line, the exit status or signal, the first and last lines of its output, the TOML error) and `r Reload config and retry`. A dashboard that exits with status 0 after running for a second or more (you pressed `q`) closes the popup instead.
@@ -81,11 +81,11 @@ A chord that arrives in a different encoding (`ESC [ Z`, kitty `CSI 9;2u`, xterm
 [workspaces.disposable-camera]
 command = ["gh", "board"]
 
-[workspaces.cloud-config]
+[workspaces.claude-config]
 command = ["gh", "dash"]
-args = ["--config", "~/.config/gh-dash/cloud-config.yml"]
+args = ["--config", "~/.config/gh-dash/claude-config.yml"]
 env = { GH_FORCE_TTY = "1" }
-cwd = "~/Projects/cloud-config"
+cwd = "~/Projects/claude-config"
 ```
 
 `command` is a string (split like a shell line) or an argv list; `args`, `env` and `cwd` are optional; a leading `~` in `command`, `args` and `cwd` is expanded. The command runs with `HERDR_DASHBOARD_MODE` and `HERDR_DASHBOARD_WORKSPACE` set, which a custom TUI can read.
