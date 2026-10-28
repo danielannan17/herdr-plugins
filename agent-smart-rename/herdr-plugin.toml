@@ -1,0 +1,68 @@
+id = "chrismalone.agent-smart-rename"
+name = "Agent Smart Rename"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Names each agent session from what it is actually doing"
+platforms = ["linux", "macos"]
+
+# A freshly detected agent has no evidence yet, so this first try usually abstains.
+[[events]]
+on = "pane.agent_detected"
+command = ["uv", "run", "--script", "rename.py"]
+
+# Restored agents and agents open before linking never fire pane.agent_detected.
+# The sweep detaches a watcher per agent and returns at once. Startup does not
+# run on link, so the sweep-agents action does the same by hand.
+[[startup]]
+command = ["uv", "run", "--script", "rename.py", "--sweep"]
+
+# herdr stops firing once a pane settles, so the watcher carries the retries.
+[[events]]
+on = "pane.agent_detected"
+command = ["sh", "watch.sh"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["uv", "run", "--script", "rename.py"]
+
+[[events]]
+on = "pane.exited"
+command = ["uv", "run", "--script", "rename.py"]
+
+# An editor needs a real terminal, which a plugin only gets inside a pane —
+# action commands run as background subprocesses with captured output.
+[[panes]]
+id = "editor"
+title = "Provider credentials"
+placement = "overlay"
+command = ["bash", "edit-provider.sh"]
+
+[[actions]]
+id = "configure-ai"
+title = "Edit provider credentials"
+contexts = ["workspace"]
+command = ["bash", "open-configure.sh"]
+
+[[actions]]
+id = "check-ai"
+title = "Validate naming configuration"
+contexts = ["workspace"]
+command = ["uv", "run", "--script", "rename.py", "--check"]
+
+[[actions]]
+id = "rename-now"
+title = "Rename focused agent now"
+contexts = ["workspace", "pane"]
+command = ["uv", "run", "--script", "rename.py", "--now"]
+
+[[actions]]
+id = "reset-agent"
+title = "Clear focused agent's name"
+contexts = ["workspace", "pane"]
+command = ["uv", "run", "--script", "rename.py", "--reset"]
+
+[[actions]]
+id = "sweep-agents"
+title = "Name all open agents and start their watchers"
+contexts = ["workspace"]
+command = ["uv", "run", "--script", "rename.py", "--sweep"]
