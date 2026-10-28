@@ -161,9 +161,7 @@ fn flow(head: &str, items: &[String], width: usize) -> Vec<String> {
 /// sidebar collapsed that includes the spaces and agents themselves, flowed
 /// into as many lines as `width` needs.
 pub fn hud_lines(m: &Model, typed: &str, width: usize) -> Vec<String> {
-    let mut header = format!(
-        "{TITLE}{BOLD}easyjump{RESET} {DIM}hjkl/HL/JK move · ⏎ keep · esc undo · ` back{RESET}"
-    );
+    let mut header = format!("{TITLE}{BOLD}easyjump{RESET} {DIM}esc close · ` back{RESET}");
     if !typed.is_empty() {
         header.push_str(&format!("  {HINT_TYPED} {typed} {RESET}"));
     }
@@ -189,14 +187,14 @@ pub fn hud_lines(m: &Model, typed: &str, width: usize) -> Vec<String> {
             lines.extend(flow(&format!("{DIM}spaces{RESET}"), &spaces, width));
         }
         let agents: Vec<String> = m
-            .ws_agents
+            .agent_order
             .iter()
-            .flat_map(|(ws_id, ids)| ids.iter().map(move |id| (ws_id, id)))
-            .map(|(ws_id, id)| {
+            .map(|id| {
                 let (name, _) = m.pane_summary(id);
                 let ws = m
-                    .workspaces
-                    .get(ws_id)
+                    .agents
+                    .get(id)
+                    .and_then(|a| m.workspaces.get(&a.workspace_id))
                     .map(|w| w.label.as_str())
                     .unwrap_or("");
                 let cur = if Some(id) == m.focused_pane.as_ref() {
@@ -474,7 +472,7 @@ pub fn render_lists(m: &Model, width: usize, typed: &str) -> Vec<String> {
 
 pub fn render_list_frame(m: &Model, typed: &str, cols: usize, rows: usize) -> Vec<String> {
     let mut header =
-        format!("{TITLE}{BOLD} easyjump {RESET}{DIM}type a hint · hjkl/HL/JK move · ⏎ keep · esc undo · ` back{RESET}");
+        format!("{TITLE}{BOLD} easyjump {RESET}{DIM}type a hint · esc close · ` back{RESET}");
     if !typed.is_empty() {
         header.push_str(&format!("  {HINT_TYPED} {typed} {RESET}"));
     }

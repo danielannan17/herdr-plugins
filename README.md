@@ -16,10 +16,31 @@ is a Herdr terminal popup. There is no separate window, so the outer terminal
 
 ![herdr-easyjump: yellow hint labels next to every space and agent row in the Herdr sidebar, plus a small HUD popup](docs/screenshot.png)
 
-Labels are single letters while there are 21 or fewer targets, two letters
-beyond that. The alphabet is home-row first (`asdfg`, `wertyuiop`,
-`zxcvbnm`). `h` `j` `k` `l` are reserved for relative movement and `q` for
-quitting, so they never appear in a label.
+Labels follow fixed rules, so they are predictable once you know them:
+
+- **Agents** are numbered in sidebar order: `1` to `9`, then `0`. Agents past
+  the tenth take letters (see below). Labels follow the current order, so an
+  agent's number changes when agents are added, removed, or reordered. The
+  order follows the sidebar's sort: grouped (`spaces`, Herdr's default) lists
+  agents by space, then tab; `priority` is one list across all spaces, blocked
+  first, then done, working, idle, and unknown, most recent state change first
+  within each. The sort is read from the label you toggle in the sidebar, else
+  from `ui.agent_panel_sort` in `config.toml`.
+- **Spaces** take a letter of their own name, in sidebar order: the first
+  letter if it is free, otherwise the next letter of the name that is still
+  free, otherwise the first free letter of the alphabet. Characters that are
+  not letters are skipped. A space called `work` is `w`; a second space called
+  `web` is `e`.
+- **Tabs** take the letters the spaces did not use, so a space letter never
+  doubles as a tab letter. Tabs always get letters, never their number.
+- **Panes** take the letters the tabs left, so splitting a pane never changes
+  a tab's letter.
+- Agents past the tenth take whatever letters are left after that.
+
+The alphabet is home-row first (`asdfghjkl`, `wertyuiop`, `zxcvbnm`). `q` is
+reserved for quitting, so it never appears in a label. When the letters run
+out, every letter label becomes two letters (`aa`, `as`, `ad`, ...); agent
+digits stay single.
 
 ## Requirements
 
@@ -106,9 +127,8 @@ Press `prefix+f`.
   focuses that agent's pane, switching workspace and tab as needed.
 - Panes of the current tab show `[x]` on their border (a display-only title
   override with a TTL, so it vanishes on its own if the plugin dies). Tabs of
-  the current workspace show their hint in the tab bar: a custom-named tab
-  gets a `[x]` prefix while the popup is open, an auto-numbered tab keeps its
-  number and that digit is the key. The HUD repeats the pane and tab hints.
+  the current workspace show their hint in the tab bar as a `[x]` prefix on the
+  tab's name while the popup is open. The HUD repeats the pane and tab hints.
 - With the sidebar collapsed to its icon rail the labels have nowhere to go,
   so the HUD also lists every space and agent, wrapped to the popup width.
   Herdr does not report the sidebar state. Herdr 0.8 lets the plugin infer
@@ -119,19 +139,11 @@ Press `prefix+f`.
   `expanded` to force the other way.
 - With two-letter labels, typing the first letter hides every label that no
   longer matches, in the sidebar and in the HUD.
-- `h` `j` `k` `l` move focus to the neighbouring pane, `H` / `L` switch to
-  the previous / next tab, `J` / `K` to the next / previous space, all
-  without losing the popup. Labels and the HUD follow the new focus, so you
-  can mix relative moves and label jumps. (Since Herdr 0.9 a popup belongs
-  to the tab it was opened on and is only drawn there, so `H` `L` `J` `K`
-  close the popup and reopen it on the target tab, about 15 ms later, with
-  the typed prefix and the origin carried over.)
-- `` ` `` (backtick) jumps back to where you were when the popup opened,
-  even after a chain of relative moves.
-- `Enter` keeps the current focus and closes (after relative moves this is
-  the "confirm"). With a unique typed prefix it jumps there instead.
-- `Esc`, `q`, or `Ctrl-C` undoes: focus returns to where it was when the
-  popup opened, then the popup closes.
+- `` ` `` (backtick) jumps back to the pane that was focused before the last
+  hop.
+- `Enter` with a unique typed prefix jumps there; otherwise it closes the
+  popup and keeps the current focus.
+- `Esc`, `q`, or `Ctrl-C` closes the popup and keeps the current focus.
 - `Backspace` clears the typed prefix.
 
 ## How it works

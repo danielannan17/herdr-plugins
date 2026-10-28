@@ -1,13 +1,16 @@
 //! Session snapshot types and the label model.
 
+use crate::agent_sort::{self, AgentSort};
 use crate::rpc::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
-/// Home-row first. "h", "j", "k", "l" are reserved for relative movement and
-/// "q" for quitting, so they never appear in a label.
-pub const ALPHABET: &str = "asdfgwertyuiopzxcvbnm";
+/// Home-row first. "q" is reserved for quitting, so it never appears in a label.
+pub const ALPHABET: &str = "asdfghjklwertyuiopzxcvbnm";
+/// Keys of the first ten agents, in sidebar order.
+pub const AGENT_DIGITS: &str = "1234567890";
 pub const TOKEN: &str = "hint"; // sidebar rows render this as $hint
 pub const SOURCE: &str = "xzedx.easyjump";
 pub const TOKEN_TTL_MS: u64 = 15_000; // backstop: labels vanish on their own if we die
@@ -91,6 +94,8 @@ pub struct Agent {
     #[serde(default)]
     pub agent_status: Option<String>,
     #[serde(default)]
+    pub state_change_seq: u64,
+    #[serde(default)]
     pub terminal_title_stripped: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -149,21 +154,83 @@ pub enum Kind {
 
 pub type Dest = (Kind, String);
 
-pub fn make_labels(n: usize) -> Vec<String> {
+/// What a destination is, as far as label assignment cares.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Role {
+    Agent,
+    /// A space, with its name (its letters pick the label).
+    Space(String),
+    Pane,
+    Tab,
+}
+
+fn two_letter_labels(n: usize) -> Vec<String> {
     let letters: Vec<char> = ALPHABET.chars().collect();
-    if n <= letters.len() {
-        return letters[..n].iter().map(|c| c.to_string()).collect();
-    }
     let mut out = Vec::with_capacity(n);
     for a in &letters {
         for b in &letters {
-            out.push(format!("{a}{b}"));
             if out.len() == n {
                 return out;
             }
+            out.push(format!("{a}{b}"));
         }
     }
     out
+}
+
+/// One label per role, in the same order. Agents take the digits 1-9, 0 in
+/// order. Spaces take a letter of their own name, then tabs take what the
+/// spaces left, then panes take what the tabs left, then agents beyond the
+/// tenth take what is left of that, so splitting a pane never moves a tab's
+/// letter. When the letters cannot cover everything, every letter label becomes
+/// two letters (digits stay single, so no label is a prefix of another).
+pub fn assign_labels(roles: &[Role]) -> Vec<String> {
+    let mut labels = vec![String::new(); roles.len()];
+    let mut spaces = Vec::new();
+    let mut tabs = Vec::new();
+    let mut panes = Vec::new();
+    let mut agents = Vec::new();
+    for (i, role) in roles.iter().enumerate() {
+        match role {
+            Role::Space(_) => spaces.push(i),
+            Role::Tab => tabs.push(i),
+            Role::Pane => panes.push(i),
+            Role::Agent => agents.push(i),
+        }
+    }
+    let overflow = agents.split_off(agents.len().min(AGENT_DIGITS.len()));
+    for (&i, digit) in agents.iter().zip(AGENT_DIGITS.chars()) {
+        labels[i] = digit.to_string();
+    }
+
+    let mut free: Vec<char> = ALPHABET.chars().collect();
+    let lettered: Vec<usize> = spaces
+        .iter()
+        .chain(&tabs)
+        .chain(&panes)
+        .chain(&overflow)
+        .copied()
+        .collect();
+    if lettered.len() > free.len() {
+        for (i, label) in lettered.into_iter().zip(two_letter_labels(roles.len())) {
+            labels[i] = label;
+        }
+        return labels;
+    }
+    for &i in &spaces {
+        let Role::Space(name) = &roles[i] else {
+            continue;
+        };
+        let own = name
+            .chars()
+            .map(|c| c.to_ascii_lowercase())
+            .find_map(|c| free.iter().position(|&f| f == c));
+        labels[i] = free.remove(own.unwrap_or(0)).to_string();
+    }
+    for (&i, letter) in tabs.iter().chain(&panes).chain(&overflow).zip(free) {
+        labels[i] = letter.to_string();
+    }
+    labels
 }
 
 pub fn short_path(p: &str) -> String {
@@ -179,8 +246,9 @@ pub fn short_path(p: &str) -> String {
     p.to_string()
 }
 
-/// Strip a leading "[xx] " hint we put there ourselves, so a reload while the
-/// popup is open (or the `--clear` helper) sees the original label.
+/// Strip a leading "[x] " or "[xx] " hint we put there ourselves, so a popup
+/// that died with hints still up (or the `--clear` helper) sees the original
+/// label.
 pub fn strip_hint(s: &str) -> &str {
     let Some(rest) = s.strip_prefix('[') else {
         return s;
@@ -200,29 +268,6 @@ pub fn strip_hint(s: &str) -> &str {
     }
 }
 
-/// A tab that still carries Herdr's automatic label (its number). The tab bar
-/// already shows that number, so it doubles as the hint; renaming such a tab
-/// would pin the label and stop it from renumbering.
-pub fn auto_tab_key(t: &Tab) -> Option<String> {
-    if t.label == t.number.to_string() && (1..=9).contains(&t.number) {
-        Some(t.label.clone())
-    } else {
-        None
-    }
-}
-
-fn status_rank(s: Option<&str>) -> i32 {
-    match s {
-        Some("blocked") => 0,
-        Some("waiting") => 1,
-        Some("error") => 2,
-        Some("done") => 3,
-        Some("working") => 4,
-        Some("idle") => 5,
-        _ => 9,
-    }
-}
-
 pub struct Model {
     pub focused_pane: Option<String>,
     pub current_tab: Option<String>,
@@ -234,8 +279,8 @@ pub struct Model {
     pub tab_panes: Vec<LayoutPane>,
     pub ws_rows: Vec<(Workspace, Vec<Tab>)>,
     pub current_ws_tabs: Vec<Tab>,
-    /// Agent panes per workspace, in sidebar order (sidebar mode only).
-    pub ws_agents: Vec<(String, Vec<String>)>,
+    /// Agent panes in sidebar order (sidebar mode only).
+    pub agent_order: Vec<String>,
     /// Columns left of the pane area, i.e. the sidebar's width. -1 if unknown.
     pub sidebar_cols: i64,
     /// Outer terminal size, derived from the pane area. (0, 0) if unknown.
@@ -247,7 +292,7 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(snap: Snapshot, ctx: Context, mode: Mode) -> Self {
+    pub fn new(snap: Snapshot, ctx: Context, mode: Mode, sort: AgentSort) -> Self {
         let current_tab = ctx.tab_id.or(snap.focused_tab_id);
         let current_ws = ctx.workspace_id.or(snap.focused_workspace_id);
 
@@ -322,14 +367,12 @@ impl Model {
             .unwrap_or_default();
 
         let mut dests: Vec<Dest> = Vec::new();
-        let mut fixed: Vec<Option<String>> = Vec::new(); // parallel to dests
         let mut seen: HashSet<Dest> = HashSet::new();
-        let mut ws_agents: Vec<(String, Vec<String>)> = Vec::new();
-        let mut add = |kind: Kind, id: &str, key: Option<String>| {
+        let mut agent_order: Vec<String> = Vec::new();
+        let mut add = |kind: Kind, id: &str| {
             let d = (kind, id.to_string());
             if seen.insert(d.clone()) {
                 dests.push(d);
-                fixed.push(key);
             }
         };
         let tab_number = |pane_id: &str| -> i64 {
@@ -342,57 +385,73 @@ impl Model {
 
         match mode {
             Mode::Sidebar => {
+                let mut listed: Vec<&Agent> = Vec::new();
                 for (ws, _) in &ws_rows {
-                    add(Kind::Workspace, &ws.workspace_id, None);
+                    add(Kind::Workspace, &ws.workspace_id);
                     let mut here: Vec<&Agent> = agents
                         .values()
                         .filter(|a| a.workspace_id == ws.workspace_id)
                         .collect();
                     here.sort_by_key(|a| (tab_number(&a.pane_id), a.pane_id.clone()));
-                    let ids: Vec<String> = here.iter().map(|a| a.pane_id.clone()).collect();
-                    for id in &ids {
-                        add(Kind::Pane, id, None);
-                    }
-                    ws_agents.push((ws.workspace_id.clone(), ids));
+                    listed.extend(here);
+                }
+                agent_sort::order(&mut listed, sort);
+                for a in listed {
+                    add(Kind::Pane, &a.pane_id);
+                    agent_order.push(a.pane_id.clone());
                 }
                 for p in &tab_panes {
-                    add(Kind::Pane, &p.pane_id, None);
+                    add(Kind::Pane, &p.pane_id);
                 }
                 if current_ws_tabs.len() > 1 {
                     for t in &current_ws_tabs {
-                        add(Kind::Tab, &t.tab_id, auto_tab_key(t));
+                        add(Kind::Tab, &t.tab_id);
                     }
                 }
             }
             Mode::List => {
                 for p in &tab_panes {
-                    add(Kind::Pane, &p.pane_id, None);
+                    add(Kind::Pane, &p.pane_id);
                 }
                 let mut all: Vec<&Agent> = agents.values().collect();
-                all.sort_by_key(|a| (status_rank(a.agent_status.as_deref()), a.pane_id.clone()));
+                all.sort_by_key(|a| {
+                    (
+                        Reverse(agent_sort::rank(a.agent_status.as_deref())),
+                        Reverse(a.state_change_seq),
+                        a.pane_id.clone(),
+                    )
+                });
                 for a in all {
-                    add(Kind::Pane, &a.pane_id, None);
+                    add(Kind::Pane, &a.pane_id);
                 }
                 for (ws, wtabs) in &ws_rows {
                     if wtabs.len() == 1 {
-                        add(Kind::Tab, &wtabs[0].tab_id, None);
+                        add(Kind::Tab, &wtabs[0].tab_id);
                     } else {
-                        add(Kind::Workspace, &ws.workspace_id, None);
+                        add(Kind::Workspace, &ws.workspace_id);
                         for t in wtabs {
-                            add(Kind::Tab, &t.tab_id, None);
+                            add(Kind::Tab, &t.tab_id);
                         }
                     }
                 }
             }
         }
 
-        // Letters go to every destination without a fixed key, in order.
-        let free = fixed.iter().filter(|f| f.is_none()).count();
-        let mut letters = make_labels(free).into_iter();
-        let labels: Vec<String> = fixed
-            .into_iter()
-            .map(|f| f.unwrap_or_else(|| letters.next().unwrap_or_default()))
+        let roles: Vec<Role> = dests
+            .iter()
+            .map(|(kind, id)| match kind {
+                Kind::Workspace => Role::Space(
+                    workspaces
+                        .get(id)
+                        .map(|w| w.label.clone())
+                        .unwrap_or_default(),
+                ),
+                Kind::Pane if agents.contains_key(id) => Role::Agent,
+                Kind::Pane => Role::Pane,
+                Kind::Tab => Role::Tab,
+            })
             .collect();
+        let labels = assign_labels(&roles);
         let label_index = dests
             .iter()
             .cloned()
@@ -411,7 +470,7 @@ impl Model {
             tab_panes,
             ws_rows,
             current_ws_tabs,
-            ws_agents,
+            agent_order,
             sidebar_cols,
             screen_cols,
             screen_rows,
@@ -425,36 +484,6 @@ impl Model {
     /// HUD has to list spaces and agents itself. Unknown counts as expanded.
     pub fn sidebar_collapsed(&self) -> bool {
         self.sidebar_cols >= 0 && self.sidebar_cols < SIDEBAR_MIN_COLS
-    }
-
-    /// Workspace before/after the current one in sidebar order, wrapping.
-    pub fn neighbour_workspace(&self, step: i64) -> Option<String> {
-        let n = self.ws_rows.len() as i64;
-        if n == 0 {
-            return None;
-        }
-        let i = self
-            .ws_rows
-            .iter()
-            .position(|(w, _)| Some(&w.workspace_id) == self.current_ws.as_ref())
-            .unwrap_or(0) as i64;
-        let j = (i + step).rem_euclid(n) as usize;
-        Some(self.ws_rows[j].0.workspace_id.clone())
-    }
-
-    /// Tab before/after the current one in the current workspace, wrapping.
-    pub fn neighbour_tab(&self, step: i64) -> Option<String> {
-        let n = self.current_ws_tabs.len() as i64;
-        if n < 2 {
-            return None;
-        }
-        let i = self
-            .current_ws_tabs
-            .iter()
-            .position(|t| Some(&t.tab_id) == self.current_tab.as_ref())
-            .unwrap_or(0) as i64;
-        let j = (i + step).rem_euclid(n) as usize;
-        Some(self.current_ws_tabs[j].tab_id.clone())
     }
 
     pub fn label(&self, kind: Kind, id: &str) -> &str {
@@ -560,23 +589,21 @@ impl Model {
         }
     }
 
-    /// Tabs of the current workspace that need a rename to show their hint
-    /// (custom-named ones; auto-numbered tabs use their number as the key).
+    /// Tabs of the current workspace that show a hint: the tab bar has no
+    /// metadata slot, so the hint is a prefix on the tab's label.
     fn renamed_tabs(&self) -> Vec<&Tab> {
         self.current_ws_tabs
             .iter()
             .filter(|t| {
-                auto_tab_key(t).is_none()
-                    && self
-                        .label_index
-                        .contains_key(&(Kind::Tab, t.tab_id.clone()))
+                self.label_index
+                    .contains_key(&(Kind::Tab, t.tab_id.clone()))
             })
             .collect()
     }
 
     /// Push (or refresh) every visible hint: the $hint token on sidebar rows,
     /// the title override on the borders of the current tab's panes, and a
-    /// label prefix on custom-named tabs. Hints that no longer match `typed`
+    /// label prefix on tabs. Hints that no longer match `typed`
     /// are withdrawn.
     pub fn publish_hints(&self, client: &mut Client, typed: &str) {
         // One report_metadata call per pane, even when it is both an agent
@@ -673,5 +700,115 @@ impl Model {
                 let _ = client.call("tab.rename", json!({ "tab_id": t.tab_id, "label": orig }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space(name: &str) -> Role {
+        Role::Space(name.into())
+    }
+
+    #[test]
+    fn agents_take_digits_then_letters_the_rest_left_over() {
+        let mut roles = vec![space("work")];
+        roles.extend(vec![Role::Agent; 12]);
+        let labels = assign_labels(&roles);
+        assert_eq!(labels[0], "w");
+        assert_eq!(labels[1..10], ["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+        assert_eq!(labels[10], "0");
+        // 11th and 12th agents: first free letters, skipping the space's "w".
+        assert_eq!(labels[11], "a");
+        assert_eq!(labels[12], "s");
+    }
+
+    #[test]
+    fn space_takes_next_free_letter_of_its_name_on_collision() {
+        let labels = assign_labels(&[space("api"), space("app"), space("alpha")]);
+        // "app": a taken, p free. "alpha": a taken, l free.
+        assert_eq!(labels, ["a", "p", "l"]);
+    }
+
+    #[test]
+    fn space_falls_back_to_first_free_alphabet_letter() {
+        // "aa" has no second letter to try, "1-" has no letters at all.
+        let labels = assign_labels(&[space("a"), space("aa"), space("1-")]);
+        assert_eq!(labels, ["a", "s", "d"]);
+    }
+
+    #[test]
+    fn spaces_never_take_the_reserved_quit_key() {
+        let labels = assign_labels(&[space("queue"), space("Quiet")]);
+        // "queue": q is reserved, u is free. "Quiet": q reserved, u taken, i free.
+        assert_eq!(labels, ["u", "i"]);
+    }
+
+    #[test]
+    fn tabs_then_panes_get_letters_the_spaces_did_not_use() {
+        let labels = assign_labels(&[
+            space("alpha"),
+            space("sigma"),
+            Role::Pane,
+            Role::Tab,
+            Role::Tab,
+        ]);
+        assert_eq!(labels, ["a", "s", "g", "d", "f"]);
+    }
+
+    #[test]
+    fn adding_a_pane_does_not_change_any_tab_label() {
+        let tab_labels = |roles: &[Role]| -> Vec<String> {
+            assign_labels(roles)
+                .into_iter()
+                .zip(roles)
+                .filter(|(_, r)| **r == Role::Tab)
+                .map(|(l, _)| l)
+                .collect()
+        };
+        let before = [space("alpha"), Role::Tab, Role::Pane, Role::Tab, Role::Pane];
+        let after = [
+            space("alpha"),
+            Role::Tab,
+            Role::Pane,
+            Role::Pane,
+            Role::Tab,
+            Role::Pane,
+        ];
+        assert_eq!(tab_labels(&before), tab_labels(&after));
+    }
+
+    #[test]
+    fn spaces_are_labelled_before_tabs_and_panes_regardless_of_order() {
+        let labels = assign_labels(&[Role::Pane, space("zed")]);
+        assert_eq!(labels, ["a", "z"]);
+    }
+
+    #[test]
+    fn too_many_letter_targets_switch_all_of_them_to_two_letters() {
+        let mut roles = vec![Role::Agent];
+        roles.extend(vec![Role::Pane; ALPHABET.len() + 1]);
+        let labels = assign_labels(&roles);
+        assert_eq!(labels[0], "1");
+        assert_eq!(labels[1], "aa");
+        assert_eq!(labels[2], "as");
+        let mut seen = HashSet::new();
+        assert!(labels.iter().all(|l| seen.insert(l.clone())));
+        // No label is a prefix of another, so typing never jumps early.
+        for a in &labels {
+            for b in &labels {
+                assert!(a == b || !b.starts_with(a.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn hint_prefix_is_stripped_for_digits_and_letters() {
+        assert_eq!(strip_hint("[3] build"), "build");
+        assert_eq!(strip_hint("[j] build"), "build");
+        assert_eq!(strip_hint("[as] build"), "build");
+        assert_eq!(strip_hint("[abc] build"), "[abc] build");
+        assert_eq!(strip_hint("build"), "build");
     }
 }
