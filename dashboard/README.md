@@ -1,4 +1,4 @@
-# herdr-dashboard
+# Dashboard
 
 A Herdr plugin that opens a Personal or Work dashboard in a floating popup. Personal is the same everywhere. Work is the dashboard of the workspace you opened it from: `gh board` for one repository, `gh dash` for others, any terminal program you like.
 
@@ -9,11 +9,13 @@ Requires Herdr 0.9.0 or newer, Python 3.11 or newer (`tomllib`), and nothing els
 ## Install
 
 ```bash
-# 1. Register the plugin (a local checkout; Herdr does not need to be running)
-herdr plugin link /path/to/herdr-dashboard
+# 1. Register the plugin (Herdr does not need to be running)
+herdr plugin install danielannan17/herdr-plugins/dashboard
+# or, from a checkout:
+herdr plugin link /path/to/herdr-plugins/dashboard
 
 # 2. Configure the dashboards
-cp /path/to/herdr-dashboard/config.example.toml "$(herdr plugin config-dir herdr-dashboard)/config.toml"
+cp /path/to/herdr-plugins/dashboard/config.example.toml "$(herdr plugin config-dir herdr-dashboard)/config.toml"
 ```
 
 3. Bind the key in `~/.config/herdr/config.toml`:
