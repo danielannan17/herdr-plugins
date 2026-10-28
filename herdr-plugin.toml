@@ -1,0 +1,24 @@
+id = "danielannan17.new-tab"
+name = "New Tab"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Workspace-aware New Tab popup: pick the destination workspace and an optional name"
+platforms = ["linux", "macos"]
+
+# The action asks Herdr for the popup directly, so no interpreter starts
+# before the popup does.
+[[actions]]
+id = "open"
+title = "New tab"
+description = "Create a tab in the current or another workspace"
+contexts = ["global", "workspace"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "danielannan17.new-tab", "--entrypoint", "new-tab"]
+
+[[panes]]
+id = "new-tab"
+title = "Create New Tab"
+description = "Name the tab and choose its workspace"
+placement = "popup"
+width = 56
+height = 9
+command = ["python3", "main.py"]
