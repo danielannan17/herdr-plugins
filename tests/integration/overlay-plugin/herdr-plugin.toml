@@ -1,0 +1,12 @@
+id = "test.overlay"
+name = "Test overlay"
+version = "0.0.1"
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+
+# Stands in for "an existing floating window": an overlay pane the dashboard must open above.
+[[panes]]
+id = "overlay"
+title = "Existing float"
+placement = "overlay"
+command = ["sh", "-c", "echo OVERLAY-UP; exec cat"]
