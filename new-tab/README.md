@@ -1,4 +1,4 @@
-# herdr-new-tab
+# New Tab
 
 A workspace-aware **Create New Tab** popup for [Herdr](https://herdr.dev) 0.9+. It replaces `Ctrl+B` `C`.
 
@@ -44,7 +44,9 @@ In the list, `✓` marks the destination and `· active` marks the workspace Her
 Requires Herdr 0.9.0 or newer and `python3` (3.8+, standard library only) on the `PATH` that Herdr runs plugins with.
 
 ```bash
-herdr plugin link /path/to/herdr-new-tab
+herdr plugin install danielannan17/herdr-plugins/new-tab
+# or, from a checkout:
+herdr plugin link /path/to/herdr-plugins/new-tab
 ```
 
 Add to `~/.config/herdr/config.toml`. Moving the built-in `new_tab` off `prefix+c` keeps the native dialog available on `Ctrl+B` `Shift+C`:
