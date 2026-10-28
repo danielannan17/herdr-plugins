@@ -24,7 +24,7 @@ names *tabs*. This one only ever writes *agent* names, so the two can run togeth
 
 - herdr `>= 0.7.5` — earlier releases lack the sidebar row tokens
 - [`uv`](https://docs.astral.sh/uv/) on your `PATH`
-- an OpenAI-compatible API key
+- an OpenAI-compatible API key, **or** the [Claude Code](https://claude.com/claude-code) CLI signed in to a Claude subscription
 
 ## Install
 
@@ -38,11 +38,42 @@ herdr plugin action invoke check-ai     --plugin chrismalone.agent-smart-rename
 pane — an action's own subprocess has no terminal for an editor to draw on:
 
 ```
+SMART_RENAME_PROVIDER=openai
 OPENAI_API_KEY=sk-...
 SMART_RENAME_MODEL=gpt-5.6-luna
 SMART_RENAME_BASE_URL=https://api.openai.com/v1
 SMART_RENAME_TIMEOUT_MS=20000
 ```
+
+### Using your Claude subscription instead
+
+Set `SMART_RENAME_PROVIDER=claude` and no API key is needed. Each naming call runs
+
+```
+claude -p --model haiku --tools "" --strict-mcp-config --setting-sources "" \
+  --disable-slash-commands --no-session-persistence --output-format json \
+  --system-prompt <naming-prompt.md>
+```
+
+with the evidence on stdin. That gives the call no tools, no MCP servers, no
+user/project settings, hooks or plugins, and writes no session. The plugin also
+strips `CLAUDE_*` variables (plugin directories, session ids) from the child's
+environment, keeping only `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` for
+authentication, so a call started from inside a Claude session does not load
+that session's plugins.
+
+```
+SMART_RENAME_PROVIDER=claude
+SMART_RENAME_CLAUDE_MODEL=haiku
+SMART_RENAME_CLAUDE_BIN=/Users/you/.local/bin/claude
+```
+
+Both of the last two are optional. herdr runs plugin commands with a minimal
+environment, so the binary is looked up as `SMART_RENAME_CLAUDE_BIN`, then on
+`PATH`, then in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and
+`~/.claude/local`. A missing binary is logged to `rename.log` and the pane keeps
+its fallback label. `SMART_RENAME_TIMEOUT_MS` bounds the call. Each call spends
+subscription quota, about a second of it in CLI startup.
 
 `watch.sh` reads its interval from the environment rather than this file, since it
 never loads the provider config: set `SMART_RENAME_POLL_SECONDS` to override 60.
@@ -57,6 +88,10 @@ titles: 5/13 panes publish one
 named: 0/13 agents currently carry a name
 ```
 
+With the claude provider the first line instead reads
+`provider: claude binary=/Users/you/.local/bin/claude version=2.1.312 model=haiku timeout=20000ms`;
+the version comes from `claude --version`, so no model call is made.
+
 ## Show the names
 
 The agents panel renders the `agent` token, which is where a name lands. The
@@ -69,6 +104,17 @@ when a config references them:
 rows = [
   ["state_icon", "workspace", "tab"],
   ["agent", "terminal_title_stripped"],
+]
+```
+
+To show the plugin's readable label instead, use the `pane` token, which is
+what `herdr pane rename` writes:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["pane"],
 ]
 ```
 
@@ -123,6 +169,19 @@ An agent is renamed when either signal says the work moved on:
   read from the Claude session transcript, which is the only place it exists —
   agents that keep no transcript never trip this and rely on the title alone.
 
+**Until a model label exists, the pane shows the terminal title.** A fresh
+agent, a model that abstains, a provider error or a timeout all leave the pane
+with no label, so the plugin writes the agent's terminal title there, cut at a
+word boundary to fit 26 columns. The title is recorded as plugin-written, so it
+is never mistaken for a manual rename. It follows later title changes, and the
+first model label replaces it. A label that is already on the pane is never
+overwritten by the fallback.
+
+When the pane output comes from Claude Code, the input box and everything
+rendered below it (the statusline, the mode line) is dropped before the output
+is sent. The cut is made at the rule above the last `❯` prompt line; output with
+no rule above its last prompt is sent whole.
+
 **Rename an agent by hand and the plugin never touches it again.** It notices
 that the live name is not the one it wrote and marks the agent as yours.
 `rename-now` and `reset-agent` reclaim it.
@@ -164,6 +223,6 @@ runs cannot lose each other's lines, and in
 uv run --with pytest --with httpx --with pydantic pytest tests/ -q
 ```
 
-44 tests over the pure functions — no network, no herdr required. Design notes
+97 tests over the pure functions and the rename flow — no network, no herdr and no real model call required. Design notes
 and the empirically verified platform behaviour are in
 `docs/superpowers/specs/2026-07-24-herdr-agent-smart-rename-design.md`.

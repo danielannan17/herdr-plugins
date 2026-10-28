@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from hashlib import sha256
 from pathlib import Path
 
@@ -78,12 +80,30 @@ SECRET_PATTERNS = [
 
 HERDR_NAME_RULE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
+PROVIDERS = ("openai", "claude")
+CLAUDE_DEFAULT_MODEL = "haiku"
+CLAUDE_INSTALL_PATHS = (
+    "~/.local/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "~/.claude/local/claude",
+)
+# Claude Code reads CLAUDE_* variables to find plugins, sessions and its parent
+# process. Only these two select the account the CLI authenticates as.
+CLAUDE_ENV_KEEP = {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
+SETTING_KEYS = {
+    "OPENAI_API_KEY", "SMART_RENAME_MODEL", "SMART_RENAME_BASE_URL", "SMART_RENAME_TIMEOUT_MS",
+    "SMART_RENAME_PROVIDER", "SMART_RENAME_CLAUDE_MODEL", "SMART_RENAME_CLAUDE_BIN",
+}
+
 
 class Config(BaseModel):
-    api_key: str
+    provider: str = "openai"
+    api_key: str = ""
     model: str
-    base_url: str
+    base_url: str = ""
     timeout_ms: int
+    claude_bin: str | None = None
 
 
 class Stamp(BaseModel):
@@ -94,6 +114,8 @@ class Stamp(BaseModel):
     set_at: int = 0
     manual: bool = False
     tokens_at_naming: int | None = None
+    # label_set is the title-derived stand-in, not a model-generated label.
+    fallback: bool = False
 
 
 class Evidence(BaseModel):
@@ -160,6 +182,56 @@ def strip_agent_banner(text: str) -> str:
         and not re.fullmatch(r"[\s─═━╌╍_\-*=~#│┃|╭╮╯╰┌┐└┘]+", line)
     ]
     return "\n".join(kept)
+
+
+def is_rule_line(line: str) -> bool:
+    """True for a horizontal rule, which Claude Code may embed a title in."""
+    stripped = line.strip()
+    return stripped.count("─") >= 20 and stripped.count("─") * 2 >= len(stripped)
+
+
+def trim_agent_footer(text: str) -> str:
+    """Drop Claude Code's input box and everything rendered below it.
+
+    The footer is a rule, the `❯` prompt line, a second rule, then the
+    statusline. The last `❯` line only marks the box when a rule sits directly
+    above it; without one (a dialog is up, or another agent) the text is kept.
+    """
+    lines = text.splitlines()
+    prompt = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].lstrip().startswith("❯")), None)
+    if prompt is None:
+        return text
+    above = prompt - 1
+    while above >= 0 and not lines[above].strip():
+        above -= 1
+    if above < 0 or not is_rule_line(lines[above]):
+        return text
+    return "\n".join(lines[:above])
+
+
+def display_width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def fallback_label(title: str | None) -> str | None:
+    """The terminal title cut to the sidebar width at a word boundary."""
+    cleaned = re.sub(r"\s+", " ", TITLE_NOISE[0].sub(" ", title or "")).strip()
+    if not cleaned:
+        return None
+    label = ""
+    for word in cleaned.split():
+        candidate = f"{label} {word}" if label else word
+        if display_width(candidate) > MAX_LABEL_CHARS:
+            break
+        label = candidate
+    if label:
+        return label
+    first = ""
+    for char in cleaned.split()[0]:
+        if display_width(first + char) > MAX_LABEL_CHARS:
+            break
+        first += char
+    return first
 
 
 def evidence_is_thin(evidence: Evidence) -> bool:
@@ -251,7 +323,7 @@ def decide(
         and tokens - stamp.tokens_at_naming >= RENAME_TOKEN_STEP
     ):
         return "rename"
-    if live_label and stamp.title_hash == current_title_hash:
+    if live_label and stamp.title_hash == current_title_hash and not stamp.fallback:
         return "skip-unchanged"
     if now - stamp.set_at < RENAME_FLOOR_SECONDS:
         return "skip-floor"
@@ -420,8 +492,8 @@ def context_tokens(session_id: str | None) -> int | None:
     return None
 
 
-def load_config() -> Config | None:
-    """Read provider.env, letting the process environment win, and validate it."""
+def read_settings() -> dict[str, str]:
+    """Read provider.env, letting the process environment win."""
     values: dict[str, str] = {}
     path = config_dir() / "provider.env"
     if path.exists():
@@ -430,16 +502,33 @@ def load_config() -> Config | None:
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 key, value = stripped.split("=", 1)
                 values[key.strip()] = value.strip().strip("\"'")
-    values.update({k: v for k, v in os.environ.items() if k in {
-        "OPENAI_API_KEY", "SMART_RENAME_MODEL", "SMART_RENAME_BASE_URL", "SMART_RENAME_TIMEOUT_MS"
-    } and v})
-    if not values.get("OPENAI_API_KEY"):
+    values.update({k: v for k, v in os.environ.items() if k in SETTING_KEYS and v})
+    return values
+
+
+def provider_name(values: dict[str, str]) -> str:
+    return values.get("SMART_RENAME_PROVIDER", "openai").strip().lower()
+
+
+def load_config() -> Config | None:
+    """Validate the settings for the chosen provider, or return None when unusable."""
+    values = read_settings()
+    provider = provider_name(values)
+    timeout_ms = int(values.get("SMART_RENAME_TIMEOUT_MS", "20000"))
+    if provider == "claude":
+        return Config(
+            provider="claude",
+            model=values.get("SMART_RENAME_CLAUDE_MODEL", CLAUDE_DEFAULT_MODEL),
+            timeout_ms=timeout_ms,
+            claude_bin=values.get("SMART_RENAME_CLAUDE_BIN"),
+        )
+    if provider != "openai" or not values.get("OPENAI_API_KEY"):
         return None
     return Config(
         api_key=values["OPENAI_API_KEY"],
         model=values.get("SMART_RENAME_MODEL", "gpt-5.6-luna"),
         base_url=values.get("SMART_RENAME_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
-        timeout_ms=int(values.get("SMART_RENAME_TIMEOUT_MS", "20000")),
+        timeout_ms=timeout_ms,
     )
 
 
@@ -478,7 +567,21 @@ def load_prompt() -> str:
         return shipped
 
 
+def parse_reply(content: str) -> str | None:
+    extracted = extract_name(content)
+    if extracted is None:
+        # Quoted because abstention and an unparseable reply look identical here.
+        log(f"model named nothing: {' '.join(content.split())[:160]}")
+    return extracted
+
+
 def request_name(config: Config, prompt: str, evidence_block: str) -> str | None:
+    if config.provider == "claude":
+        return request_name_claude(config, prompt, evidence_block)
+    return request_name_openai(config, prompt, evidence_block)
+
+
+def request_name_openai(config: Config, prompt: str, evidence_block: str) -> str | None:
     """Ask the provider for a name. No token cap is sent, for portability across providers."""
     try:
         response = httpx.post(
@@ -498,11 +601,89 @@ def request_name(config: Config, prompt: str, evidence_block: str) -> str | None
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
         log(f"model request failed: {type(error).__name__}: {str(error)[:160]}")
         return None
-    extracted = extract_name(content)
-    if extracted is None:
-        # Quoted because abstention and an unparseable reply look identical here.
-        log(f"model named nothing: {' '.join(content.split())[:160]}")
-    return extracted
+    return parse_reply(content)
+
+
+def is_executable_file(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def resolve_claude_bin(override: str | None) -> str | None:
+    """Find the claude CLI, which herdr's minimal PATH often cannot see."""
+    if override:
+        path = Path(override).expanduser()
+        return str(path) if is_executable_file(path) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in CLAUDE_INSTALL_PATHS:
+        path = Path(candidate).expanduser()
+        if is_executable_file(path):
+            return str(path)
+    return None
+
+
+def claude_env(binary: str) -> dict[str, str]:
+    """The environment for a naming call, without the parent Claude session's plugins and hooks."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "AI_AGENT" and (not key.startswith("CLAUDE") or key in CLAUDE_ENV_KEEP)
+    }
+    env["PATH"] = os.pathsep.join(filter(None, [str(Path(binary).parent), env.get("PATH")]))
+    return env
+
+
+def claude_command(binary: str, model: str, prompt: str) -> list[str]:
+    return [
+        binary, "-p", "--model", model,
+        "--tools", "",
+        "--strict-mcp-config",
+        "--setting-sources", "",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--output-format", "json",
+        "--system-prompt", prompt,
+    ]
+
+
+def request_name_claude(config: Config, prompt: str, evidence_block: str) -> str | None:
+    """Ask the Claude Code CLI, which bills the subscription instead of an API key."""
+    binary = resolve_claude_bin(config.claude_bin)
+    if binary is None:
+        log("claude CLI not found: set SMART_RENAME_CLAUDE_BIN or install it on PATH "
+            f"(also looked in {', '.join(CLAUDE_INSTALL_PATHS)})"
+            + (f"; SMART_RENAME_CLAUDE_BIN={config.claude_bin!r} is not executable" if config.claude_bin else ""))
+        return None
+    cwd = state_dir()
+    try:
+        cwd.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        cwd = Path("/tmp")
+    try:
+        completed = subprocess.run(
+            claude_command(binary, config.model, prompt),
+            input=evidence_block, capture_output=True, text=True, check=False,
+            timeout=config.timeout_ms / 1000, cwd=cwd, env=claude_env(binary),
+        )
+    except subprocess.TimeoutExpired:
+        log(f"claude request timed out after {config.timeout_ms}ms")
+        return None
+    except OSError as error:
+        log(f"claude request failed: {type(error).__name__}: {str(error)[:160]}")
+        return None
+    if completed.returncode != 0:
+        log(f"claude exited rc={completed.returncode}: {(completed.stderr or completed.stdout).strip()[:160]}")
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+        if payload.get("is_error"):
+            raise ValueError(str(payload.get("result"))[:160])
+        content = payload["result"]
+    except (json.JSONDecodeError, AttributeError, KeyError, ValueError) as error:
+        log(f"claude reply unusable: {type(error).__name__}: {str(error)[:160]}")
+        return None
+    return parse_reply(content)
 
 
 def gather_evidence(pane_id: str) -> tuple[Evidence, dict] | None:
@@ -527,7 +708,7 @@ def gather_evidence(pane_id: str) -> tuple[Evidence, dict] | None:
         cwd=cwd,
         branch=git_branch(cwd) if cwd else None,
         title=pane_info.get("terminal_title_stripped"),
-        recent_output=recent,
+        recent_output=trim_agent_footer(recent) if recent else recent,
     )
     return evidence, agent_info
 
@@ -593,11 +774,32 @@ def prune_orphan_stamps() -> None:
             path.unlink(missing_ok=True)
 
 
+def claude_status(config: Config) -> str:
+    """Locate the CLI and ask it for its version, which costs no model call."""
+    binary = resolve_claude_bin(config.claude_bin)
+    if binary is None:
+        return "binary=NOT FOUND (set SMART_RENAME_CLAUDE_BIN or put claude on PATH)"
+    try:
+        completed = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10,
+            check=False, env=claude_env(binary),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"binary={binary} UNRUNNABLE ({type(error).__name__})"
+    return f"binary={binary} version={completed.stdout.strip() or 'unknown'}"
+
+
 def run_check() -> int:
     """Report every diagnostic it can gather, including when the provider is unconfigured."""
     config = load_config()
     if config is None:
-        print(f"provider: NO API KEY — run configure-ai ({config_dir() / 'provider.env'})")
+        provider = provider_name(read_settings())
+        if provider in PROVIDERS:
+            print(f"provider: NO API KEY — run configure-ai ({config_dir() / 'provider.env'})")
+        else:
+            print(f"provider: UNKNOWN {provider!r} — SMART_RENAME_PROVIDER must be one of {', '.join(PROVIDERS)}")
+    elif config.provider == "claude":
+        print(f"provider: claude {claude_status(config)} model={config.model} timeout={config.timeout_ms}ms")
     else:
         print(f"provider: model={config.model} base_url={config.base_url} timeout={config.timeout_ms}ms")
     print(f"prompt: {'ok' if load_prompt().strip() else 'EMPTY'}")
@@ -651,27 +853,37 @@ def rename_pane(pane_id: str, force: bool) -> int:
         if verdict != "skip-unchanged":
             log(f"{pane_id} {verdict}")
         return 0
+    outcome = request_real_label(pane_id, evidence, session, tokens, now)
+    if outcome == "failed":
+        set_fallback_label(pane_id, evidence, session, stamp, live_label, now)
+    return 0
+
+
+def request_real_label(
+    pane_id: str, evidence: Evidence, session: str | None, tokens: int | None, now: int
+) -> str:
+    """Try for a model-generated label: "applied", "failed", or "busy" when another run holds the lock."""
     if evidence_is_thin(evidence):
         log(f"{pane_id} shows no task yet, title={evidence.title!r}")
-        return 0
+        return "failed"
     if not acquire_lock(pane_id, now):
         log(f"{pane_id} another run holds the lock")
-        return 0
+        return "busy"
 
     try:
         config = load_config()
         if config is None:
-            log("no OPENAI_API_KEY — run the configure-ai action")
-            return 0
+            log("no usable provider configuration — run the check-ai action")
+            return "failed"
         raw_name = request_name(config, load_prompt(), render_evidence(evidence, str(Path.home())))
         proposed = validate_label(raw_name)
         if proposed is None:
             if raw_name:
                 log(f"{pane_id} discarded {raw_name!r}, which is not a valid label")
-            return 0
+            return "failed"
         applied = apply_label(pane_id, proposed, evidence.workspace_label)
         if applied is None:
-            return 0
+            return "failed"
         write_stamp(pane_id, Stamp(
             label_set=applied, name_set=name_for(applied),
             title_hash=title_hash(evidence.title),
@@ -679,9 +891,38 @@ def rename_pane(pane_id: str, force: bool) -> int:
             tokens_at_naming=tokens,
         ))
         log(f"{pane_id} labelled {applied!r}")
+        return "applied"
     finally:
         release_lock(pane_id)
-    return 0
+
+
+def set_fallback_label(
+    pane_id: str, evidence: Evidence, session: str | None,
+    stamp: Stamp | None, live_label: str | None, now: int,
+) -> None:
+    """Show the terminal title until the model produces a label.
+
+    Written through the plugin's own label channel and stamped as plugin-written,
+    so manual-rename detection still tells it apart from a hand edit. Another
+    label already on the pane is never overwritten.
+    """
+    label = fallback_label(evidence.title)
+    if label is None:
+        return
+    ours = stamp is not None and stamp.fallback and live_label == stamp.label_set
+    if live_label and not ours:
+        return
+    if ours and (live_label == label or stamp.title_hash == title_hash(evidence.title)):
+        return
+    result = herdr("pane", "rename", pane_id, label)
+    if not result or "error" in result:
+        log(f"fallback label for {pane_id} failed: {str((result or {}).get('error'))[:160]}")
+        return
+    write_stamp(pane_id, Stamp(
+        label_set=label, title_hash=title_hash(evidence.title),
+        agent_session_id=session, set_at=now, fallback=True,
+    ))
+    log(f"{pane_id} fallback label {label!r}")
 
 
 def main() -> int:
