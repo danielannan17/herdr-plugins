@@ -21,6 +21,8 @@ computer restarts.
 
 </div>
 
+Forked from [alexarthurs/herdr-notes](https://github.com/alexarthurs/herdr-notes) (MIT).
+
 That's the note docked on the right, keeping its shape while the test suite runs
 next door. Terminals are where the work happens, and the work generates thoughts —
 half-finished todo lists, commands you keep retyping, things to ask about later.
