@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# open-notes.sh — unix launcher for the herdr-notes pane.
+#
+# Idempotent "launch-or-focus, toggle on repeat", scoped to the FOCUSED
+# pane's workspace (each workspace has its own note file; the binary matches
+# panes by note-FILE identity, see state.rs note_key):
+#   - no Notes pane on that note file       -> open one in the current tab,
+#     DOCKED ON THE RIGHT edge (any-tab scope within the workspace: a second
+#     live instance on the same note file would clobber it on save)
+#   - a Notes pane exists but isn't focused -> focus it
+#   - the focused pane IS the Notes pane    -> close it (toggle off)
+#   - Notes pane with a stale heartbeat     -> close the corpse, open fresh
+#
+# Right dock: split the tab's RIGHTMOST pane to the right. `pane split --ratio`
+# is the ORIGINAL pane's share, so ~0.7 leaves the new Notes pane ~0.3 on the
+# right edge — no `pane swap` needed.
+#
+# All ids/ratios come from the binary's unit-tested stdin modes
+# (--launch-decision / --focused-pane / --open-plan), never ad-hoc JSON
+# parsing; the ids it emits are validated flag-safe before reaching an argv.
+set -uo pipefail
+
+herdr_bin="${HERDR_BIN_PATH:-herdr}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+bin="$script_dir/../target/release/herdr-notes"
+
+# Without the binary there is no decision logic; fall back to herdr's
+# declarative pane open (right split — degraded but functional).
+if [ ! -x "$bin" ]; then
+  exec "$herdr_bin" plugin pane open \
+    --plugin herdr-notes \
+    --entrypoint notes \
+    --placement split \
+    --direction right \
+    --focus
+fi
+
+# ALWAYS the GLOBAL pane list — never scoped with `--workspace
+# $HERDR_WORKSPACE_ID`. Focus is global (exactly one focused pane across ALL
+# workspaces) and this shell's spawn-time env id can diverge from the focused
+# pane's actual workspace (pane moved between workspaces, action invoked under
+# another workspace's env): a scoped list would then omit the focused pane
+# entirely, the decision would degrade to OPEN, and a duplicate Notes pane
+# would spawn beside the focused workspace's live one — two instances
+# clobbering one note file. The binary does the scoping instead:
+# --launch-decision keys off the FOCUSED pane's own workspace_id field,
+# matching panes by note-FILE identity (state.rs note_key).
+panes="$("$herdr_bin" pane list 2>/dev/null || true)"
+
+open_pane() {
+  local fp fid fcwd plan target ratio out np
+  fp="$(printf '%s' "$panes" | "$bin" --focused-pane 2>/dev/null || true)"
+  fid="${fp%%	*}"
+  fcwd="${fp#*	}"
+  if [ -z "$fid" ]; then
+    exec "$herdr_bin" plugin pane open --plugin herdr-notes \
+      --entrypoint notes --placement split --direction right --focus
+  fi
+
+  target="$fid"
+  ratio="0.70"
+  plan="$("$herdr_bin" pane layout --pane "$fid" 2>/dev/null | "$bin" --open-plan 2>/dev/null || true)"
+  if [ -n "$plan" ]; then
+    target="${plan%%	*}"
+    ratio="${plan#*	}"
+  fi
+
+  # Per herdr's plugin docs, durable state belongs in HERDR_PLUGIN_STATE_DIR;
+  # actions receive it but split panes do not — pass it through to the TUI.
+  out="$("$herdr_bin" pane split "$target" --direction right --ratio "$ratio" \
+    ${fcwd:+--cwd "$fcwd"} \
+    ${HERDR_PLUGIN_STATE_DIR:+--env "HERDR_PLUGIN_STATE_DIR=$HERDR_PLUGIN_STATE_DIR"} \
+    --no-focus 2>/dev/null || true)"
+  np="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+  [ -n "$np" ] || exit 1
+
+  # Stamp the identity token BEFORE the TUI spawns (best effort — the TUI
+  # re-stamps at startup): --launch-decision treats label-without-token as
+  # a restart corpse to REPLACE, so a fresh pane must never be observable
+  # in that state, or a second toggle during startup would replace it.
+  "$bin" --stamp "$np" >/dev/null 2>&1 || true
+
+  # The split already put the new pane on the right edge — no swap needed.
+  "$herdr_bin" pane run "$np" "exec \"$bin\""
+  "$herdr_bin" pane rename "$np" "Notes" >/dev/null 2>&1 || true
+  # herdr has no focus-by-id; a zoom on/off cycle focuses deterministically.
+  "$herdr_bin" pane zoom "$np" --on >/dev/null 2>&1 || true
+  exec "$herdr_bin" pane zoom "$np" --off
+}
+
+decision="OPEN"
+if [ -n "$panes" ]; then
+  decision="$(printf '%s' "$panes" | "$bin" --launch-decision 2>/dev/null || echo OPEN)"
+fi
+
+case "$decision" in
+  "FOCUS "*)
+    pid="${decision#FOCUS }"
+    "$herdr_bin" pane zoom "$pid" --on >/dev/null 2>&1 || true
+    exec "$herdr_bin" pane zoom "$pid" --off
+    ;;
+  "CLOSE "*)
+    pid="${decision#CLOSE }"
+    # Graceful save+quit before the close: Esc leaves edit mode (which saves),
+    # q quits from preview. `pane close` alone kills the TUI, losing any
+    # keystrokes still inside the 2s autosave debounce window.
+    "$herdr_bin" pane send-keys "$pid" Escape q >/dev/null 2>&1 || true
+    sleep 0.4
+    # `pane run` exec'd the TUI, so the pane normally closes itself when the
+    # TUI quits; this close is cleanup for a wedged TUI and often finds the
+    # pane already gone — that is success, not an error.
+    "$herdr_bin" pane close "$pid" >/dev/null 2>&1 || true
+    exit 0
+    ;;
+  "REPLACE "*)
+    # Dead pane (stale heartbeat): close the corpse, then dock a fresh one.
+    # The Esc+q is a best-effort save in case the pane is alive after all
+    # (e.g. just woken from a suspend); harmless on a real corpse.
+    pid="${decision#REPLACE }"
+    "$herdr_bin" pane send-keys "$pid" Escape q >/dev/null 2>&1 || true
+    sleep 0.4
+    "$herdr_bin" pane close "$pid" >/dev/null 2>&1 || true
+    # Re-list panes AFTER the close: the corpse may have been the focused
+    # pane, and open_pane derives its split target from this snapshot — a
+    # stale one made `pane layout`/`pane split` fail with pane_not_found.
+    panes="$("$herdr_bin" pane list 2>/dev/null || true)"
+    open_pane
+    ;;
+  *)
+    open_pane
+    ;;
+esac
