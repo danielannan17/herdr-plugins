@@ -1,6 +1,6 @@
-//! herdr-notes — a persistent markdown notes pane for herdr: one scrollable
-//! note with preview/edit modes, autosaved to a JSON file that survives
-//! restarts.
+//! herdr-notes — a persistent markdown notes pane for herdr: a workspace note
+//! and a global note, each scrollable with preview/edit modes, autosaved to
+//! JSON files that survive restarts.
 //!
 //! The `--*` stdin→stdout helper modes serve the launcher scripts — see
 //! launch.rs.
@@ -77,9 +77,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> std::io::
         // Every iteration — not only on poll timeout — so sustained input
         // (held-key auto-repeat, a long paste) can never starve the liveness
         // stamp into REPLACE territory or hold back the debounced autosave.
-        // Both self-throttle, so this is cheap.
+        // All self-throttle, so this is cheap.
         app.heartbeat();
         app.maybe_flush();
+        app.maybe_reload();
     }
 }
 

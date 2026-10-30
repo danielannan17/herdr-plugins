@@ -4,9 +4,10 @@
 
 ### The scratch note that lives beside your agents.
 
-One markdown note per workspace in a dockable [herdr](https://github.com/ogulcancelik/herdr)
-pane — rendered preview, plain-text editing, and it never forgets: everything
-autosaves and survives computer restarts.
+A markdown note per workspace, plus one global note, in a dockable
+[herdr](https://github.com/ogulcancelik/herdr) pane — rendered preview,
+plain-text editing, and it never forgets: everything autosaves and survives
+computer restarts.
 
 <img alt="Rust" src="https://img.shields.io/badge/Rust-self--contained_crate-orange?logo=rust&logoColor=white">
 <img alt="herdr" src="https://img.shields.io/badge/herdr-%E2%89%A5%200.7-5865a3">
@@ -37,8 +38,10 @@ herdr plugin install alexarthurs/herdr-notes
 - **Rendered markdown** — headings, checkboxes, lists, quotes, code blocks
   and inline styles, drawn natively in the terminal with a scrollbar.
 - **Zero-friction editing** — `e` to type, `Esc` to go back. That's it.
-- **A note per workspace** — every herdr space keeps its own note, keyed to
-  the workspace itself (renames don't lose it).
+- **A note per workspace, and a global one** — every herdr space keeps its
+  own note, keyed to the workspace itself (renames don't lose it), and a
+  second note is shared by all of them. A tab bar at the top switches
+  between the two.
 - **Actually persistent** — atomic autosaves to a per-workspace JSON file in
   herdr's config directory. Close the pane, kill the terminal, reboot: it
   comes back.
@@ -80,6 +83,8 @@ Preview (default):
 | Key | Action |
 | --- | --- |
 | `e` / `Enter` | edit the note |
+| `Tab` | switch between the Workspace and Global notes |
+| `1` / `2` | show the Workspace / Global note |
 | `Up` `Down` `PgUp` `PgDn` | scroll |
 | `g` / `G` | jump to top / bottom |
 | `x` | clear the note (y/N confirm) |
@@ -92,11 +97,24 @@ Edit:
 | `Esc` | back to preview (saves) |
 | `Ctrl+S` | save now (autosave runs anyway, ~2s after the last keystroke) |
 
-`Esc` never exits the app.
+`Esc` never exits the app. In edit mode `Tab`, `1` and `2` are text, so press
+`Esc` first to switch notes.
 
 <div align="center">
 <img src="docs/media/edit.png" alt="Edit mode: the same note as plain markdown with a block cursor" width="920">
 </div>
+
+## Workspace and global notes
+
+The top row shows two tabs, ` Workspace ` and ` Global `, with the active one
+highlighted, followed by the mode and scroll position. The Workspace tab is the
+note of the current herdr workspace; the Global tab is one note shared by every
+workspace. Switching saves the note you leave, then shows the other with the
+mode it was saved in. `x` and everything else act on the active note only.
+
+The selected tab is remembered in `_view.json` (`{"tab":"global"}`), so the pane
+opens on the tab you left it on. The pane opens on Workspace when that file is
+missing or unreadable.
 
 ## Persistence
 
@@ -112,10 +130,21 @@ shared `notes.json` when there's no workspace id), and any note found in
 the fallback layout is moved into the state dir on first load — an
 existing note is inherited, never lost.
 
+The global note is `_global.json` in the same directory (`herdr/notes/` under
+the config dir in the fallback layout). The leading underscore keeps it from
+ever colliding with a workspace id, which is alphanumeric. `_view.json` sits
+beside it.
+
 The format is `{ "text": "...", "mode": "preview"|"edit" }`. Saves are
 atomic (temp file + fsync + rename) and happen on leaving edit mode, clear,
 quit, and debounced while typing. A missing or corrupt file falls back to
 an empty note — it never wedges the pane.
+
+The pane re-reads the active note's file about once a second. When something
+else has rewritten it — another Notes pane showing the same global note, or a
+script — and you have no unsaved edits, the new text appears. While you are
+mid-edit with unsaved changes the pane leaves the file alone and your next
+autosave overwrites it (last writer wins).
 
 ## Hacking
 

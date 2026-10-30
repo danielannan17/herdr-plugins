@@ -1,7 +1,8 @@
 # herdr-notes
 
 A single herdr plugin: a persistent markdown notes pane (one scrollable note
-per workspace, preview/edit modes). Standalone Rust crate — the repo root IS
+per workspace plus one global note shared by all workspaces, a tab bar to
+switch between them, preview/edit modes). Standalone Rust crate — the repo root IS
 the plugin root (`herdr plugin link .` from here).
 
 **Living doc**: when you discover a non-obvious herdr/Windows/TUI behavior the hard
@@ -11,10 +12,14 @@ findings doc (and the reference implementation, `herdr-sidebar`) lives in
 
 ## Layout
 
-- `src/main.rs` — event loop (500ms poll); `--launch-decision` / `--focused-pane` /
+- `src/main.rs` — event loop (500ms poll; heartbeat, autosave and external-change
+  reload checks run every iteration); `--launch-decision` / `--focused-pane` /
   `--open-plan` stdin modes used by the launcher scripts
-- `src/app.rs` — App state: preview/edit, clear-confirm overlay, 2s debounced
-  autosave, 5s heartbeat, scrollbars
+- `src/app.rs` — App state: Workspace/Global tabs (preview-mode `Tab`/`1`/`2`;
+  in edit mode those keys are text), preview/edit, clear-confirm overlay, 2s
+  debounced autosave, 5s heartbeat, ~1s reload of the active note when its file's
+  mtime changed and nothing is dirty (unsaved edits win, last writer wins),
+  scrollbars
 - `src/markdown.rs` — hand-rolled renderer (headings, lists, checkboxes, quotes,
   code, bold/italic, hr) + display-width wrapping
 - `src/state.rs` — `{text, mode}` JSON, one file PER WORKSPACE in herdr's
@@ -35,6 +40,12 @@ findings doc (and the reference implementation, `herdr-sidebar`) lives in
   identity of a workspace id (None = shared legacy file; Windows folds ASCII
   case because NTFS filenames are case-insensitive) — the launcher guard
   compares THESE keys so it can never drift from the on-disk layout.
+  The GLOBAL note is `_global.json` and the selected tab is `_view.json`
+  (`{"tab":"global"|"workspace"}`), both beside the workspace notes in either
+  layout (`<state dir>/` or `<config>/herdr/notes/`); the underscore can never
+  collide with a workspace key, and the global note never migrates. `Store`
+  bundles base + workspace id so `App` (and its tests, via a temp dir) reach
+  every file through one object.
   Forgiving parse, atomic save (temp + `sync_all` + rename); path logic
   takes an injected base dir so tests never touch the real APPDATA
 - `src/launch.rs` — OPEN/FOCUS/CLOSE/REPLACE toggle decisions (20s stale
@@ -161,8 +172,8 @@ The three shots in `docs/media/` (hero / edit / welcome) must show:
   `pane send-text` (NOT `pane run` — text must sit unsubmitted so no agent
   actually runs and no tokens burn).
 - Exactly ONE title per pane: the border label says "Notes"; the in-app
-  header shows only `[preview]`/`[edit]` + scroll position (user-reported
-  duplicate — do not reintroduce).
+  header shows only the Workspace/Global tabs, `[preview]`/`[edit]` and scroll
+  position (user-reported duplicate — do not reintroduce).
 - The note pinned to the TOP (`send-keys <pane> g` immediately before the
   capture — a mouse wheel over the focused pane can scroll it between steps,
   so keep g→capture in ONE command) showing the demo note with headings,

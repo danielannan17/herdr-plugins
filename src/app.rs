@@ -1,11 +1,12 @@
-//! Notes TUI: preview/edit modes over one scrollable markdown note, autosaved
-//! to this workspace's note file (see state.rs), heartbeating a pane identity
-//! token so the launcher can toggle / focus / replace the pane.
+//! Notes TUI: preview/edit modes over one scrollable markdown note — this
+//! workspace's or the global one, chosen by tab — autosaved to its note file
+//! (see state.rs), heartbeating a pane identity token so the launcher can
+//! toggle / focus / replace the pane.
 //!
 //! There is no manual save workflow — everything autosaves — and the only
 //! destructive action (`x`, clear the note) sits behind a y/N confirm.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -18,17 +19,20 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::render_markdown;
-use crate::state::{self, Mode, Note};
+use crate::state::{Mode, Note, Store, Tab};
 
 /// Debounce for the edit-mode autosave.
 const AUTOSAVE_AFTER: Duration = Duration::from_secs(2);
 /// Identity re-stamp interval (launcher stale threshold is 20s).
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
+/// How often the active note's file is checked for outside changes.
+const RELOAD_CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// Shown in preview when the note is empty; doubles as the quick-start help.
-const EMPTY_HELP: &str = "(empty note)\n\n  e or Enter        start writing\n  Esc               back to preview (saves)\n  Up/Dn PgUp/PgDn   scroll, g/G top/bottom\n  x                 clear the note (asks first)\n  q                 quit\n\nEverything autosaves and survives restarts.";
+const EMPTY_HELP: &str = "(empty note)\n\n  e or Enter        start writing\n  Esc               back to preview (saves)\n  Tab or 1/2        switch Workspace / Global note\n  Up/Dn PgUp/PgDn   scroll, g/G top/bottom\n  x                 clear the note (asks first)\n  q                 quit\n\nEverything autosaves and survives restarts.";
 
 pub struct App {
+    tab: Tab,
     note: Note,
     /// The note split into lines while editing.
     lines: Vec<String>,
@@ -43,20 +47,33 @@ pub struct App {
     body_height: usize,
     pane_id: Option<String>,
     last_beat: Instant,
-    /// Disabled in unit tests so exercising keys never touches disk.
-    persist: bool,
+    /// `None` in most unit tests so exercising keys never touches disk.
+    store: Option<Store>,
+    /// Modification time of the active note's file when this pane last read
+    /// or wrote it.
+    known_mtime: Option<SystemTime>,
+    last_check: Instant,
 }
 
 impl App {
     pub fn new() -> Self {
-        let mut app = Self::with_note(state::load(), true);
+        let store = Store::from_env();
+        let tab = store.as_ref().map(Store::load_tab).unwrap_or_default();
+        // Stat before reading: a write landing in between is picked up by the
+        // next reload check instead of being missed.
+        let known_mtime = store.as_ref().and_then(|s| s.mtime(tab));
+        let note = store.as_ref().map(|s| s.load(tab)).unwrap_or_default();
+        let mut app = Self::with_note(note, store);
+        app.tab = tab;
+        app.known_mtime = known_mtime;
         app.pane_id = std::env::var("HERDR_PANE_ID").ok().filter(|id| !id.is_empty());
         app.report_tokens();
         app
     }
 
-    fn with_note(note: Note, persist: bool) -> Self {
+    fn with_note(note: Note, store: Option<Store>) -> Self {
         let mut app = Self {
+            tab: Tab::default(),
             note,
             lines: Vec::new(),
             row: 0,
@@ -69,7 +86,9 @@ impl App {
             body_height: 20,
             pane_id: None,
             last_beat: Instant::now(),
-            persist,
+            store,
+            known_mtime: None,
+            last_check: Instant::now(),
         };
         if app.note.mode == Mode::Edit {
             app.enter_edit();
@@ -79,9 +98,54 @@ impl App {
 
     // ----- persistence & heartbeat -------------------------------------
 
-    fn save(&self) {
-        if self.persist {
-            state::save(&self.note);
+    fn save(&mut self) {
+        if let Some(store) = &self.store {
+            store.save(self.tab, &self.note);
+            self.known_mtime = store.mtime(self.tab);
+        }
+    }
+
+    /// Reload the active note when something else rewrote its file (another
+    /// pane on the same note, a script) and nothing here is unsaved. With
+    /// unsaved edits the next autosave wins.
+    pub fn maybe_reload(&mut self) {
+        if self.last_check.elapsed() < RELOAD_CHECK_EVERY {
+            return;
+        }
+        self.last_check = Instant::now();
+        let Some(store) = &self.store else { return };
+        let disk = store.mtime(self.tab);
+        if !should_reload(self.dirty, disk, self.known_mtime) {
+            return;
+        }
+        self.known_mtime = disk;
+        self.note.text = store.load(self.tab).text;
+        if self.note.mode == Mode::Edit {
+            self.lines = self.note.text.split('\n').map(String::from).collect();
+            self.row = self.row.min(self.lines.len() - 1);
+            self.col = self.col.min(clen(&self.lines[self.row]));
+        }
+    }
+
+    /// Show the other note: save this one, remember the tab, then load the
+    /// target note with its saved mode.
+    fn switch_tab(&mut self, tab: Tab) {
+        if tab == self.tab {
+            return;
+        }
+        self.commit();
+        self.dirty = false;
+        self.save();
+        self.tab = tab;
+        self.confirm_clear = false;
+        self.preview_scroll = 0;
+        self.edit_scroll = 0;
+        let Some(store) = &self.store else { return };
+        store.save_tab(tab);
+        self.known_mtime = store.mtime(tab);
+        self.note = store.load(tab);
+        if self.note.mode == Mode::Edit {
+            self.enter_edit();
         }
     }
 
@@ -157,6 +221,12 @@ impl App {
                 return true;
             }
             KeyCode::Char('e') | KeyCode::Enter => self.enter_edit(),
+            KeyCode::Tab => self.switch_tab(match self.tab {
+                Tab::Workspace => Tab::Global,
+                Tab::Global => Tab::Workspace,
+            }),
+            KeyCode::Char('1') => self.switch_tab(Tab::Workspace),
+            KeyCode::Char('2') => self.switch_tab(Tab::Global),
             KeyCode::Up => self.preview_scroll = self.preview_scroll.saturating_sub(1),
             KeyCode::Down => self.preview_scroll = self.preview_scroll.saturating_add(1),
             KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(page),
@@ -313,11 +383,20 @@ impl App {
         };
 
         // The pane border already says "Notes" (metadata title) — repeating it
-        // here read as a duplicate, so the header carries only mode + scroll.
-        let mut title = vec![Span::styled(
-            format!(" [{mode}]"),
-            Style::default().fg(Color::Cyan),
-        )];
+        // here read as a duplicate, so the header carries only the tabs, mode
+        // and scroll.
+        let tab_style = |tab: Tab| {
+            if self.tab == tab {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            }
+        };
+        let mut title = vec![
+            Span::styled(" Workspace ", tab_style(Tab::Workspace)),
+            Span::styled(" Global ", tab_style(Tab::Global)),
+            Span::styled(format!(" [{mode}]"), Style::default().fg(Color::Cyan)),
+        ];
         if let Some(hint) = scroll_hint {
             title.push(Span::styled(
                 format!("  {hint}"),
@@ -327,8 +406,10 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(title)), title_a);
 
         let hints = match self.note.mode {
-            Mode::Preview => " e/Enter edit   Up/Dn scroll   g/G top/end   x clear   q quit",
-            Mode::Edit => " Esc preview (saves)   Ctrl+S save",
+            Mode::Preview => {
+                " e/Enter edit   Tab/1/2 switch   Up/Dn scroll   g/G top/end   x clear   q quit"
+            }
+            Mode::Edit => " Esc preview (saves, then Tab/1/2 switch)   Ctrl+S save",
         };
         frame.render_widget(
             Paragraph::new(Span::styled(hints, Style::default().add_modifier(Modifier::DIM))),
@@ -437,6 +518,13 @@ fn draw_confirm(frame: &mut Frame, area: Rect) {
     );
 }
 
+/// A file changed by someone else is reloaded only while nothing here is
+/// unsaved (`dirty` covers an edit buffer with unsaved changes). A missing
+/// file never triggers a reload.
+fn should_reload(dirty: bool, disk: Option<SystemTime>, known: Option<SystemTime>) -> bool {
+    !dirty && disk.is_some() && disk != known
+}
+
 fn clen(s: &str) -> usize {
     s.chars().count()
 }
@@ -447,6 +535,8 @@ fn byte_idx(s: &str, char_idx: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -456,7 +546,7 @@ mod tests {
     fn app(text: &str) -> App {
         App::with_note(
             Note { text: text.to_string(), mode: Mode::Preview },
-            false, // never touch the real state file from tests
+            None, // never touch the real state files from tests
         )
     }
 
@@ -556,9 +646,142 @@ mod tests {
 
     #[test]
     fn startup_in_edit_mode_loads_the_buffer() {
-        let mut a = App::with_note(Note { text: "a\nb".into(), mode: Mode::Edit }, false);
+        let mut a = App::with_note(Note { text: "a\nb".into(), mode: Mode::Edit }, None);
         assert_eq!(a.lines, vec!["a".to_string(), "b".to_string()]);
         a.on_key(key(KeyCode::Esc));
         assert_eq!(a.note.text, "a\nb", "leaving edit commits losslessly");
+    }
+
+    /// App on a fresh temp plugin-state dir, as the real pane runs.
+    fn stored_app(tag: &str, text: &str) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("notes-app-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::in_plugin_dir(dir.clone(), "w1");
+        let a = App::with_note(Note { text: text.into(), mode: Mode::Preview }, Some(store));
+        (a, dir)
+    }
+
+    fn disk(dir: &std::path::Path, tab: Tab) -> Note {
+        Store::in_plugin_dir(dir.to_path_buf(), "w1").load(tab)
+    }
+
+    #[test]
+    fn tab_keys_switch_notes_in_preview() {
+        let (mut a, dir) = stored_app("keys", "ws");
+        assert_eq!(a.tab, Tab::Workspace);
+        a.on_key(key(KeyCode::Tab));
+        assert_eq!(a.tab, Tab::Global);
+        a.on_key(key(KeyCode::Tab));
+        assert_eq!(a.tab, Tab::Workspace);
+        a.on_key(key(KeyCode::Char('2')));
+        assert_eq!(a.tab, Tab::Global);
+        a.on_key(key(KeyCode::Char('2')));
+        assert_eq!(a.tab, Tab::Global, "selecting the active tab keeps it");
+        a.on_key(key(KeyCode::Char('1')));
+        assert_eq!(a.tab, Tab::Workspace);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_keys_are_text_in_edit_mode() {
+        let (mut a, dir) = stored_app("edit", "");
+        a.on_key(key(KeyCode::Char('e')));
+        for code in [KeyCode::Tab, KeyCode::Char('1'), KeyCode::Char('2')] {
+            a.on_key(key(code));
+        }
+        assert_eq!(a.tab, Tab::Workspace);
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.note.text, "  12");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_saves_this_note_and_shows_the_other() {
+        let (mut a, dir) = stored_app("switch", "workspace text");
+        Store::in_plugin_dir(dir.clone(), "w1")
+            .save(Tab::Global, &Note { text: "global text".into(), mode: Mode::Preview });
+        a.preview_scroll = 5;
+        a.on_key(key(KeyCode::Char('2')));
+        assert_eq!(disk(&dir, Tab::Workspace).text, "workspace text", "saved on the way out");
+        assert_eq!(a.note.text, "global text");
+        assert_eq!(a.preview_scroll, 0);
+        assert!(!a.confirm_clear);
+        assert_eq!(Store::in_plugin_dir(dir.clone(), "w1").load_tab(), Tab::Global);
+
+        a.on_key(key(KeyCode::Char('x')));
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(disk(&dir, Tab::Global).text, "", "clear acts on the active note only");
+        a.on_key(key(KeyCode::Char('1')));
+        assert_eq!(a.note.text, "workspace text");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_restores_the_other_notes_saved_mode() {
+        let (mut a, dir) = stored_app("mode", "ws");
+        Store::in_plugin_dir(dir.clone(), "w1")
+            .save(Tab::Global, &Note { text: "a\nb".into(), mode: Mode::Edit });
+        a.on_key(key(KeyCode::Char('2')));
+        assert_eq!(a.note.mode, Mode::Edit);
+        assert_eq!(a.lines, vec!["a".to_string(), "b".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_decision_waits_for_a_clean_note_and_an_existing_changed_file() {
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(should_reload(false, Some(t1), Some(t0)));
+        assert!(should_reload(false, Some(t1), None), "file appeared");
+        assert!(!should_reload(true, Some(t1), Some(t0)), "unsaved edits win");
+        assert!(!should_reload(false, Some(t0), Some(t0)), "unchanged");
+        assert!(!should_reload(false, None, Some(t0)), "missing file is never reloaded");
+        assert!(!should_reload(false, None, None));
+    }
+
+    #[test]
+    fn external_change_reloads_a_clean_note_but_not_unsaved_edits() {
+        let (mut a, dir) = stored_app("reload", "mine");
+        a.save();
+        let store = Store::in_plugin_dir(dir.clone(), "w1");
+        let external = |text: &str| {
+            store.save(Tab::Workspace, &Note { text: text.into(), mode: Mode::Preview });
+            let f = std::fs::File::options().write(true).open(dir.join("w1.json")).unwrap();
+            f.set_modified(SystemTime::now() + Duration::from_secs(60)).unwrap();
+        };
+        let due = |a: &mut App| a.last_check = Instant::now() - RELOAD_CHECK_EVERY;
+
+        external("theirs");
+        a.last_check = Instant::now();
+        a.maybe_reload();
+        assert_eq!(a.note.text, "mine", "checked at most once a second");
+        due(&mut a);
+        a.maybe_reload();
+        assert_eq!(a.note.text, "theirs");
+
+        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('!')));
+        external("later");
+        due(&mut a);
+        a.maybe_reload();
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.note.text, "!theirs", "mid-edit changes are kept; autosave wins");
+        assert_eq!(disk(&dir, Tab::Workspace).text, "!theirs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_bar_draws_in_tiny_panes_without_panicking() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut a = app("# t\n\nbody");
+        for (w, h) in [(80, 10), (29, 5), (10, 3), (3, 1), (1, 1), (20, 0)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+        }
+        let mut term = Terminal::new(TestBackend::new(40, 4)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        let top: String = (0..40).map(|x| term.backend().buffer()[(x, 0)].symbol().to_string()).collect();
+        assert!(top.starts_with(" Workspace  Global  [preview]"), "{top:?}");
     }
 }

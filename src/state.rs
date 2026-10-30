@@ -1,5 +1,7 @@
-//! Persistent note state: one scrollable markdown note PER WORKSPACE plus the
-//! last-active mode, stored as a small JSON file beside herdr's own config
+//! Persistent note state: one scrollable markdown note PER WORKSPACE, one
+//! GLOBAL note shared by every workspace (`_global.json`), plus the last-active
+//! mode of each and the selected tab (`_view.json`), stored as small JSON files
+//! beside herdr's own config
 //! (`%APPDATA%\herdr\notes\<workspace-id>.json` on Windows,
 //! `$XDG_CONFIG_HOME/herdr/…` elsewhere) so the note survives computer
 //! restarts. The key is the stable `HERDR_WORKSPACE_ID` herdr injects into
@@ -12,6 +14,7 @@
 //! and best-effort: the pane keeps working for the session if persist fails.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Pane label the launcher assigns and the heartbeat re-asserts as the title.
 pub const PANE_LABEL: &str = "Notes";
@@ -46,10 +49,33 @@ impl Mode {
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Note {
-    /// Raw markdown of the single note.
+    /// Raw markdown of the note.
     pub text: String,
     pub mode: Mode,
 }
+
+/// Which note the pane shows: this workspace's, or the one every workspace
+/// shares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Tab {
+    #[default]
+    Workspace,
+    Global,
+}
+
+impl Tab {
+    fn name(self) -> &'static str {
+        match self {
+            Tab::Workspace => "workspace",
+            Tab::Global => "global",
+        }
+    }
+}
+
+/// File names shared by every workspace. The leading underscore keeps them
+/// clear of workspace keys, which are alphanumeric (see `is_filename_safe`).
+const GLOBAL_FILE: &str = "_global.json";
+const VIEW_FILE: &str = "_view.json";
 
 /// Where notes live. herdr's plugin docs say durable state belongs in
 /// `HERDR_PLUGIN_STATE_DIR`, which herdr injects into plugin-run commands
@@ -143,23 +169,79 @@ fn state_dir_path(dir: &Path, workspace_id: Option<&str>) -> PathBuf {
     }
 }
 
-/// State file location for THIS process (env-derived base + workspace id).
-pub fn state_path() -> Option<PathBuf> {
-    let ws = workspace_env();
-    Some(match store_base()? {
-        StoreBase::PluginState(dir) => state_dir_path(&dir, ws.as_deref()),
-        StoreBase::Config(base) => state_path_in(&base, ws.as_deref()),
-    })
+/// Path of a file shared by every workspace, beside the workspace notes in
+/// either layout.
+fn shared_path(base: &StoreBase, name: &str) -> PathBuf {
+    match base {
+        StoreBase::PluginState(dir) => dir.join(name),
+        StoreBase::Config(base) => base.join("herdr").join("notes").join(name),
+    }
 }
 
-pub fn load() -> Note {
-    let ws = workspace_env();
-    match store_base() {
-        Some(StoreBase::PluginState(dir)) => {
-            load_state_dir(&dir, config_base().as_deref(), ws.as_deref())
+/// Where THIS process keeps its notes: the env-derived base plus the
+/// workspace id.
+pub struct Store {
+    base: StoreBase,
+    /// Migration source for the plugin-state layout.
+    config: Option<PathBuf>,
+    workspace: Option<String>,
+}
+
+impl Store {
+    /// `None` when there is nowhere to persist; the pane then runs unsaved.
+    pub fn from_env() -> Option<Self> {
+        Some(Self { base: store_base()?, config: config_base(), workspace: workspace_env() })
+    }
+
+    #[cfg(test)]
+    pub fn in_plugin_dir(dir: PathBuf, workspace: &str) -> Self {
+        Self {
+            base: StoreBase::PluginState(dir),
+            config: None,
+            workspace: Some(workspace.to_string()),
         }
-        Some(StoreBase::Config(base)) => load_in(&base, ws.as_deref()),
-        None => Note::default(),
+    }
+
+    fn path(&self, tab: Tab) -> PathBuf {
+        match (tab, &self.base) {
+            (Tab::Global, base) => shared_path(base, GLOBAL_FILE),
+            (Tab::Workspace, StoreBase::PluginState(dir)) => {
+                state_dir_path(dir, self.workspace.as_deref())
+            }
+            (Tab::Workspace, StoreBase::Config(base)) => {
+                state_path_in(base, self.workspace.as_deref())
+            }
+        }
+    }
+
+    /// The global note never migrates: there is no older layout for it.
+    pub fn load(&self, tab: Tab) -> Note {
+        match (tab, &self.base) {
+            (Tab::Global, _) => read_note(&self.path(tab)),
+            (Tab::Workspace, StoreBase::PluginState(dir)) => {
+                load_state_dir(dir, self.config.as_deref(), self.workspace.as_deref())
+            }
+            (Tab::Workspace, StoreBase::Config(base)) => load_in(base, self.workspace.as_deref()),
+        }
+    }
+
+    pub fn save(&self, tab: Tab, note: &Note) {
+        write_atomic(&self.path(tab), &to_json(note));
+    }
+
+    /// Modification time of a note's file; `None` when it does not exist.
+    pub fn mtime(&self, tab: Tab) -> Option<SystemTime> {
+        std::fs::metadata(self.path(tab)).and_then(|m| m.modified()).ok()
+    }
+
+    pub fn load_tab(&self) -> Tab {
+        std::fs::read_to_string(shared_path(&self.base, VIEW_FILE))
+            .map(|json| parse_tab(&json))
+            .unwrap_or_default()
+    }
+
+    pub fn save_tab(&self, tab: Tab) {
+        write_atomic(&shared_path(&self.base, VIEW_FILE), &tab_to_json(tab));
     }
 }
 
@@ -234,24 +316,39 @@ pub fn to_json(note: &Note) -> String {
     .to_string()
 }
 
+/// Forgiving parse of `_view.json`: anything but `{"tab":"global"}` is the
+/// workspace tab.
+pub fn parse_tab(json: &str) -> Tab {
+    let value: serde_json::Value =
+        serde_json::from_str(json.trim_start_matches('\u{feff}')).unwrap_or_default();
+    match value.get("tab").and_then(|v| v.as_str()) {
+        Some("global") => Tab::Global,
+        _ => Tab::Workspace,
+    }
+}
+
+/// The JSON that goes on disk: `{ "tab": "workspace"|"global" }`.
+pub fn tab_to_json(tab: Tab) -> String {
+    serde_json::json!({ "tab": tab.name() }).to_string()
+}
+
 /// Atomic best-effort persist: write a temp file, fsync it, then rename over
 /// the real one (std's rename replaces existing files on Windows too). The
 /// fsync BEFORE the rename matters: without it a crash or power loss can make
 /// the rename durable ahead of the data, leaving an empty/truncated file the
 /// forgiving loader would silently turn into an empty note.
-pub fn save(note: &Note) {
-    let Some(path) = state_path() else { return };
+fn write_atomic(path: &Path, contents: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("json.tmp");
     let written = std::fs::File::create(&tmp).and_then(|mut f| {
         use std::io::Write;
-        f.write_all(to_json(note).as_bytes())?;
+        f.write_all(contents.as_bytes())?;
         f.sync_all()
     });
     if written.is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 
@@ -396,5 +493,67 @@ mod tests {
         assert_eq!(load_in(&empty, Some("w9")), Note::default());
         assert_eq!(load_in(&empty, None), Note::default());
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn global_and_view_files_sit_beside_the_workspace_notes() {
+        let base = Path::new("base");
+        let cfg = StoreBase::Config(base.to_path_buf());
+        assert_eq!(
+            shared_path(&cfg, GLOBAL_FILE),
+            base.join("herdr").join("notes").join("_global.json")
+        );
+        assert_eq!(
+            shared_path(&cfg, VIEW_FILE).parent(),
+            state_path_in(base, Some("w6")).parent()
+        );
+        let dir = Path::new("state");
+        let plugin = StoreBase::PluginState(dir.to_path_buf());
+        assert_eq!(shared_path(&plugin, GLOBAL_FILE), dir.join("_global.json"));
+        assert_eq!(shared_path(&plugin, VIEW_FILE), dir.join("_view.json"));
+        assert_eq!(shared_path(&plugin, GLOBAL_FILE).parent(), state_dir_path(dir, Some("w6")).parent());
+    }
+
+    #[test]
+    fn global_note_is_independent_of_the_workspace_and_never_migrates() {
+        let base = temp_base("global");
+        let dir = base.join("plugin-state");
+        write_note(&legacy_path_in(&base), "legacy");
+        let store = Store {
+            base: StoreBase::PluginState(dir.clone()),
+            config: Some(base.clone()),
+            workspace: Some("w6".into()),
+        };
+        assert_eq!(store.load(Tab::Global), Note::default());
+        assert!(legacy_path_in(&base).exists(), "loading the global note leaves legacy files");
+        store.save(Tab::Global, &Note { text: "shared".into(), mode: Mode::Edit });
+        assert_eq!(store.load(Tab::Global), Note { text: "shared".into(), mode: Mode::Edit });
+        assert!(dir.join("_global.json").exists());
+        assert_eq!(store.load(Tab::Workspace).text, "legacy", "workspace note is its own file");
+        assert!(store.mtime(Tab::Global).is_some());
+        assert!(store.mtime(Tab::Workspace).is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn view_roundtrips_and_garbage_means_workspace() {
+        for tab in [Tab::Workspace, Tab::Global] {
+            assert_eq!(parse_tab(&tab_to_json(tab)), tab);
+        }
+        assert_eq!(tab_to_json(Tab::Global), r#"{"tab":"global"}"#);
+        assert_eq!(parse_tab(&format!("\u{feff}{}", tab_to_json(Tab::Global))), Tab::Global);
+        for bad in ["", "garbage", "{}", "[]", r#"{"tab":5}"#, r#"{"tab":"bogus"}"#, "null"] {
+            assert_eq!(parse_tab(bad), Tab::Workspace, "input {bad:?}");
+        }
+    }
+
+    #[test]
+    fn missing_view_file_opens_the_workspace_tab_and_save_tab_persists() {
+        let base = temp_base("view");
+        let store = Store::in_plugin_dir(base.join("state"), "w6");
+        assert_eq!(store.load_tab(), Tab::Workspace);
+        store.save_tab(Tab::Global);
+        assert_eq!(store.load_tab(), Tab::Global);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
