@@ -1,0 +1,48 @@
+id = "xzedx.easyjump"
+name = "EasyJump"
+version = "0.8.1"
+min_herdr_version = "0.8.2"
+description = "Press a key, type a letter, jump to any space, agent, pane, or tab. EasyMotion / Vimium / vim-choosewin style hint labels, drawn right in the Herdr sidebar."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# Sidebar mode: labels appear next to every space and agent row in the sidebar,
+# a tiny HUD popup captures the key. `--open` sizes the popup to its content:
+# five rows with the sidebar expanded, more when it is collapsed and the HUD
+# has to list the spaces and agents itself.
+[[actions]]
+id = "open"
+title = "EasyJump: hint jump (sidebar)"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-easyjump", "--open"]
+
+# List mode: one big popup with a pane mini-map and full tab/agent lists.
+[[actions]]
+id = "open-list"
+title = "EasyJump: hint jump (list popup)"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-easyjump", "--open-list"]
+
+[[actions]]
+id = "back"
+title = "EasyJump: jump back to previous pane"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-easyjump", "--back"]
+
+[[panes]]
+id = "jump"
+title = "EasyJump"
+placement = "popup"
+width = 64
+height = 5
+command = ["./target/release/herdr-easyjump"]
+
+[[panes]]
+id = "list"
+title = "EasyJump list"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["./target/release/herdr-easyjump", "--list"]
