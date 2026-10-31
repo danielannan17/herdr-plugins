@@ -23,3 +23,4 @@ Plugins by other people that I run alongside these.
 | Plugin | What it does | Install |
 |---|---|---|
 | [herdr-session-parker](https://github.com/iviaxpow3r/herdr-session-parker) | Parks a pane or tab, closing its agent to free resources, and resumes the agent session later | `herdr plugin install iviaxpow3r/herdr-session-parker` |
+| [herdr-agent-nav](https://github.com/newro/herdr-agent-nav) | Agent prev, next and back that pivot on the agent you were last in, with index numbers on the sidebar rows | `herdr plugin install newro/herdr-agent-nav` |

@@ -38,8 +38,7 @@ findings doc (and the reference implementation, `herdr-sidebar`) lives in
   file into the workspace's slot (read-in-place if the rename fails; the
   per-workspace file wins when both exist). `note_key` exposes the note-FILE
   identity of a workspace id (None = shared legacy file; Windows folds ASCII
-  case because NTFS filenames are case-insensitive) — the launcher guard
-  compares THESE keys so it can never drift from the on-disk layout.
+  case because NTFS filenames are case-insensitive).
   The GLOBAL note is `_global.json` and the selected tab is `_view.json`
   (`{"tab":"global"|"workspace"}`), both beside the workspace notes in either
   layout (`<state dir>/` or `<config>/herdr/notes/`); the underscore can never
@@ -49,12 +48,10 @@ findings doc (and the reference implementation, `herdr-sidebar`) lives in
   Forgiving parse, atomic save (temp + `sync_all` + rename); path logic
   takes an injected base dir so tests never touch the real APPDATA
 - `src/launch.rs` — OPEN/FOCUS/CLOSE/REPLACE toggle decisions (20s stale
-  heartbeat OR label-without-token restart corpse → REPLACE); prefers a
-  same-tab Notes pane but matches any pane whose
-  `note_key` EQUALS the focused pane's, so a second instance on the same note
-  file is never spawned (two live instances = last-writer-wins data loss) even
-  when different raw workspace ids coarsen to one file (unsafe/missing ids →
-  legacy, NTFS case folding); Notes panes on other note files are ignored
+  heartbeat OR label-without-token restart corpse → REPLACE); considers only
+  Notes panes in the focused pane's own tab, so each tab can hold its own
+  (several panes on one note file reload from disk within ~1s; only unsaved
+  edits made in two panes inside the autosave window can overwrite each other)
 - `src/ipc.rs` — socket client: named pipe `\\.\pipe\<HERDR_SOCKET_PATH>` on
   Windows, unix socket elsewhere; one NDJSON request per connection
 - `scripts/open-notes.ps1` / `open-notes.sh` — toggle launchers (right-dock);
@@ -120,9 +117,8 @@ Learned building this plugin:
   pane's actual workspace (pane moved between workspaces, action invoked
   under another workspace's env) — the scoped list then omits the focused
   pane, `--launch-decision` degrades to OPEN, and a duplicate Notes pane
-  spawns beside the focused workspace's live one. All scoping happens in the
-  binary off each pane's `workspace_id` FIELD, compared by note-file identity
-  (`state::note_key`) so the guard matches exactly the panes that share a file.
+  spawns beside the focused tab's live one. All scoping happens in the
+  binary off each pane's `tab_id` FIELD.
 - `herdr plugin action invoke` runs the action in the GLOBALLY focused
   workspace context, not the invoking pane's. Keybinding use is fine (the
   focused workspace IS the intended one), but a background/scripted invoke
@@ -225,7 +221,6 @@ Hard constraints learned live:
   THIS workspace, seed the demo note into `notes\<ws>.json` (backup and
   restore the user's file; read the seed markdown with
   `Get-Content -Raw -Encoding UTF8` or em-dashes mojibake), close any
-  existing same-workspace Notes pane first (the launcher would FOCUS it
-  instead of opening in the staging tab), `capture.ps1` → `crop.ps1 8 48
+  `capture.ps1` → `crop.ps1 8 48
   1744 940` → frame via `frame_pil.frame` into `docs/media/`. Keep framed
   titles/filenames stable (hero/edit/welcome).
