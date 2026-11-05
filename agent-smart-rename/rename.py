@@ -486,9 +486,13 @@ def resolve_session(agent_info: dict) -> str | None:
     herdr reports no session for some Claude panes (an attached background session,
     a pane that was already open). The registry lists every live session with its
     cwd and display name, so the pane's session is the unclaimed live one in its cwd.
+
+    herdr can also report a stale session, the one a pane was resumed from after it
+    branched in place. Two panes claiming the same session shows that, so the id is
+    then re-derived from the registry, telling the panes apart by their titles.
     """
     reported = (agent_info.get("agent_session") or {}).get("value")
-    if reported or agent_info.get("agent") != "claude":
+    if agent_info.get("agent") != "claude":
         return reported
     pane_id = agent_info.get("pane_id")
     agents = (herdr("agent", "list") or {}).get("agents") or []
@@ -496,6 +500,9 @@ def resolve_session(agent_info: dict) -> str | None:
         (other.get("agent_session") or {}).get("value")
         for other in agents if other.get("pane_id") != pane_id
     }
+    if reported and reported not in claimed:
+        return reported
+    claimed.discard(reported)
     candidates = []
     for path in CLAUDE_SESSIONS_DIR.glob("*.json"):
         try:
@@ -513,7 +520,7 @@ def resolve_session(agent_info: dict) -> str | None:
     if len(candidates) > 1:
         title = normalise_title(agent_info.get("terminal_title_stripped") or "")
         candidates = [c for c in candidates if title and normalise_title(c.get("name") or "") == title]
-    return candidates[0]["sessionId"] if len(candidates) == 1 else None
+    return candidates[0]["sessionId"] if len(candidates) == 1 else reported
 
 
 def transcript_path(session_id: str | None) -> Path | None:
@@ -955,6 +962,7 @@ def sync_tab(agent_info: dict, label: str, title: str | None, prior: Stamp | Non
     ours = (
         current in unnamed
         or current == fields["tab_label_set"]
+        or current == agent_info.get("agent")
         or normalise_title(current) in known_titles
     )
     if not ours:

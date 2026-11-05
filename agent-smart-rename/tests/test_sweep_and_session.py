@@ -63,6 +63,21 @@ def test_the_session_herdr_reports_wins(claude_home, monkeypatch):
     assert rename.resolve_session(info(session="reported")) == "reported"
 
 
+def test_a_session_two_panes_claim_is_re_derived_from_the_registry_by_title(claude_home, monkeypatch):
+    listing(monkeypatch, "shared")
+    register(claude_home, "shared", name="Personal Site")
+    register(claude_home, "branch", name="Portfolio images")
+    assert rename.resolve_session(info(session="shared", title="Portfolio images")) == "branch"
+    assert rename.resolve_session(info(session="shared", title="Personal Site")) == "shared"
+
+
+def test_a_shared_session_stays_reported_when_the_registry_cannot_tell_the_panes_apart(claude_home, monkeypatch):
+    listing(monkeypatch, "shared")
+    register(claude_home, "shared", name="one")
+    register(claude_home, "branch", name="two")
+    assert rename.resolve_session(info(session="shared")) == "shared"
+
+
 def test_an_unreported_session_is_the_live_one_in_the_agents_cwd(claude_home, monkeypatch):
     listing(monkeypatch)
     register(claude_home, "mine")

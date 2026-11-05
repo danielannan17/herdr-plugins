@@ -57,7 +57,7 @@ def flow(tmp_path, monkeypatch):
             agent="claude", workspace_label="app", cwd="/w", branch="main",
             title=fake.title,
         )
-        return evidence, {"name": None, "agent_session": {"value": "s1"}, "tab_id": "w1:t6"}
+        return evidence, {"name": None, "agent": "claude", "agent_session": {"value": "s1"}, "tab_id": "w1:t6"}
 
     monkeypatch.setattr(rename, "herdr", fake)
     monkeypatch.setattr(rename, "gather_evidence", gather)
@@ -112,6 +112,13 @@ def test_a_previous_terminal_title_is_taken_over(flow):
     flow.model["reply"] = "Build Herdr dashboard"
     flow.run()
     assert flow.herdr.tab()["label"] == "Build Herdr dashboard"
+
+
+def test_a_tab_named_after_the_agent_is_taken(flow):
+    flow.herdr.tab()["label"] = "claude"
+    flow.run()
+    assert flow.herdr.tab()["label"] == "Build Herdr dashboard"
+    assert not rename.read_stamp("w1:p1").tab_manual
 
 
 def test_a_manual_tab_name_is_kept_and_not_retried(flow):
