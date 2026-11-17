@@ -9,8 +9,9 @@ Plugins for [Herdr](https://herdr.dev) 0.9+. Each folder is a self-contained plu
 | [dashboard](dashboard/) | Popup that runs a personal or per-workspace terminal dashboard (`gh dash`, `gh board`, …) | `herdr plugin install danielannan17/herdr-plugins/dashboard` |
 | [herdr-notes](herdr-notes/) | A markdown notes pane with a note per workspace and a global note, switched by tabs (forked from alexarthurs/herdr-notes) | `herdr plugin install danielannan17/herdr-plugins/herdr-notes` |
 | [herdr-easyjump](herdr-easyjump/) | Hint-label jumping to any space, agent, pane or tab (forked from xzedx/herdr-easyjump) | `herdr plugin install danielannan17/herdr-plugins/herdr-easyjump` |
+| [herdr-caffeinate](herdr-caffeinate/) | Keeps the Mac awake only while important agent work runs (working agents, finite background builds and tests), with a sidebar indicator and a Claude Code mod that classifies background tasks | `herdr plugin install danielannan17/herdr-plugins/herdr-caffeinate` |
 
-new-tab and dashboard need only `python3`; herdr-notes and herdr-easyjump are Rust crates built with `cargo`; agent-smart-rename needs `uv` (see its README for its tests). Run new-tab's or dashboard's tests from its folder:
+new-tab, dashboard and herdr-caffeinate need only `python3` (herdr-caffeinate also ships a Claude Code mod, see its README); herdr-notes and herdr-easyjump are Rust crates built with `cargo`; agent-smart-rename needs `uv` (see its README for its tests). Run new-tab's, dashboard's or herdr-caffeinate's tests from its folder:
 
 ```bash
 python3 -m unittest discover -s tests -t .

@@ -1,0 +1,91 @@
+# herdr plugin: Caffeinate
+#
+# Keeps the Mac from idle-sleeping only while important agent work runs: an
+# agent that is working, or finite background work (builds, tests, migrations,
+# deploys, background subagents) an agent has started. Dev servers and file
+# watchers never count. The display may still sleep; closing the lid still
+# sleeps the Mac.
+#
+# Install:   herdr plugin link /path/to/herdr-caffeinate
+# Remove:    herdr plugin unlink danielannan17.caffeinate
+# Logs:      herdr plugin log list --plugin danielannan17.caffeinate
+#            ~/.local/state/herdr/plugins/danielannan17.caffeinate/daemon.log
+
+id = "danielannan17.caffeinate"
+name = "Caffeinate"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Keep the Mac awake only while important agent work runs, and show why."
+platforms = ["macos"]
+
+# python3 (stdlib only) and macOS's caffeinate. Nothing to build.
+
+# The daemon holds a flock, so every entry point can say "start it".
+[[startup]]
+command = ["python3", "caffeinate.py", "start"]
+
+# Agent status changes arrive as events; each one wakes the daemon. These hooks
+# also start the daemon on a herdr that was already running at install time.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "caffeinate.py", "poke"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["python3", "caffeinate.py", "poke"]
+
+[[events]]
+on = "pane.exited"
+command = ["python3", "caffeinate.py", "poke"]
+
+[[events]]
+on = "pane.closed"
+command = ["python3", "caffeinate.py", "poke"]
+
+# Off -> Auto -> Forced -> Off. Bind it:
+#   [[keys.command]]
+#   key = "prefix+shift+c"
+#   type = "plugin_action"
+#   command = "danielannan17.caffeinate.cycle"
+[[actions]]
+id = "cycle"
+title = "Caffeinate: cycle mode"
+description = "Cycle Off, Auto and Forced"
+contexts = ["global", "workspace", "pane"]
+command = ["python3", "caffeinate.py", "action", "cycle"]
+
+[[actions]]
+id = "off"
+title = "Caffeinate: off"
+description = "Never keep the Mac awake"
+contexts = ["global", "workspace", "pane"]
+command = ["python3", "caffeinate.py", "action", "off"]
+
+[[actions]]
+id = "auto"
+title = "Caffeinate: auto"
+description = "Keep awake while important work runs"
+contexts = ["global", "workspace", "pane"]
+command = ["python3", "caffeinate.py", "action", "auto"]
+
+[[actions]]
+id = "forced"
+title = "Caffeinate: forced"
+description = "Always keep the Mac awake"
+contexts = ["global", "workspace", "pane"]
+command = ["python3", "caffeinate.py", "action", "forced"]
+
+[[actions]]
+id = "details"
+title = "Caffeinate: details"
+description = "Show what is keeping the Mac awake, and what is ignored"
+contexts = ["global", "workspace", "pane"]
+command = ["python3", "caffeinate.py", "open-details"]
+
+[[panes]]
+id = "details"
+title = "Caffeinate"
+placement = "popup"
+width = "70%"
+height = "70%"
+command = ["python3", "caffeinate.py", "details-popup"]

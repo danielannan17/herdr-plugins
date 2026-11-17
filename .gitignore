@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# Claude Code mods: the engine lays its type declarations beside the mod
+**/.claude-plugin/types/
+.tmp-*.part

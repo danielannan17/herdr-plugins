@@ -1,0 +1,28 @@
+# Copy to ~/.config/herdr/plugins/config/danielannan17.caffeinate/config.toml
+# Every key is optional; the values shown are the defaults.
+
+# Mode on a fresh install: "off", "auto" or "forced". After that the mode is
+# remembered across restarts.
+default_mode = "auto"
+
+# Seconds the Mac stays awake after the last important activity.
+release_grace_sec = 5
+
+# A background command nobody has classified counts for this long ...
+unknown_grace_sec = 120
+# ... then "ignore" (default) stops counting it, "keep" keeps counting it.
+unknown_fallback = "ignore"
+
+# A task that keeps the Mac awake this long is shown as "possibly stuck" and
+# notified once. It still counts.
+stuck_after_hours = 6
+# Uncomment to also stop honouring a task after this long (a task you set to
+# "keep" is exempt). Unset by default: a long build is never dropped for age.
+# hard_cap_hours = 24
+
+# Notification when the mode changes, and when a task looks stuck.
+notify_mode_change = true
+notify_stuck = true
+
+# Seconds between full re-checks when no event arrives.
+tick_sec = 30

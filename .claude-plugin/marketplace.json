@@ -1,0 +1,14 @@
+{
+  "name": "herdr-plugins",
+  "owner": {
+    "name": "danielannan17"
+  },
+  "description": "Plugins for herdr and their Claude Code mods.",
+  "plugins": [
+    {
+      "name": "herdr-caffeinate",
+      "source": "./herdr-caffeinate/claude-mod",
+      "description": "Claude Code side of herdr-caffeinate: reports background commands and subagents, their class and their completion."
+    }
+  ]
+}

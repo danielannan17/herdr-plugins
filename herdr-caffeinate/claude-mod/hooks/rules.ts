@@ -1,0 +1,146 @@
+// Generated from ../../rules.json by sync-rules.py. Do not edit.
+import type { Rules } from './core'
+
+export const DEFAULT_RULES: Rules = {
+  "version": 1,
+  "command": {
+    "persistent": [
+      {
+        "name": "package dev server",
+        "pattern": "\\b(npm|pnpm|yarn|bun)\\s+(run\\s+)?(dev|serve|start|watch|storybook|preview)(:\\S+)?(\\s|$)"
+      },
+      {
+        "name": "next dev",
+        "pattern": "\\bnext\\s+dev\\b"
+      },
+      {
+        "name": "vite",
+        "pattern": "(^|[\\s/])vite(\\s|$)",
+        "unless": "\\bvite\\s+(build|optimize)\\b"
+      },
+      {
+        "name": "watch mode",
+        "pattern": "--watch(All)?\\b",
+        "unless": "--watch(All)?=(false|0)"
+      },
+      {
+        "name": "test watcher",
+        "pattern": "\\bvitest\\b",
+        "unless": "\\bvitest\\s+(run|bench|related|typecheck)\\b|--run\\b"
+      },
+      {
+        "name": "nodemon",
+        "pattern": "\\bnodemon\\b"
+      },
+      {
+        "name": "tail follow",
+        "pattern": "\\btail\\s+(-\\w*f\\w*|--follow)\\b"
+      },
+      {
+        "name": "server",
+        "pattern": "(^|[\\s/:])(serve|http-server|live-server|http\\.server|uvicorn|gunicorn|flask\\s+run|rails\\s+s(erver)?|ng\\s+serve|webpack\\s+serve)(\\s|$)"
+      },
+      {
+        "name": "expo start",
+        "pattern": "\\bexpo\\s+start\\b"
+      },
+      {
+        "name": "metro",
+        "pattern": "\\b(metro|react-native\\s+start)\\b"
+      },
+      {
+        "name": "supabase start",
+        "pattern": "\\bsupabase\\s+start\\b"
+      },
+      {
+        "name": "docker compose up",
+        "pattern": "\\bdocker[\\s-]compose\\s+(up|watch)\\b",
+        "unless": "\\s(-d|--detach)\\b"
+      },
+      {
+        "name": "wrangler dev",
+        "pattern": "\\b(wrangler|vercel|netlify)\\s+dev\\b"
+      },
+      {
+        "name": "tunnel",
+        "pattern": "\\b(ngrok|cloudflared\\s+tunnel|ssh\\s+.*-N)\\b"
+      },
+      {
+        "name": "cargo watch",
+        "pattern": "\\bcargo\\s+watch\\b"
+      },
+      {
+        "name": "sleep forever",
+        "pattern": "\\bsleep\\s+infinity\\b"
+      }
+    ],
+    "finite": [
+      {
+        "name": "build",
+        "pattern": "\\b(build|xcodebuild|gradlew?|assemble|bundle\\s+exec\\s+fastlane|fastlane|archive|eas\\s+build|make|tsc)\\b"
+      },
+      {
+        "name": "test",
+        "pattern": "\\b(test|tests|jest|vitest|pytest|mocha|playwright|cypress|rspec|e2e|go\\s+test)\\b"
+      },
+      {
+        "name": "migration",
+        "pattern": "\\b(migrate|migration|migrations|db\\s+push|db\\s+reset)\\b"
+      },
+      {
+        "name": "deploy",
+        "pattern": "\\b(deploy|publish|release|upload)\\b"
+      },
+      {
+        "name": "lint",
+        "pattern": "\\b(lint|eslint|prettier|ruff|biome|typecheck|tsc|clippy)\\b"
+      },
+      {
+        "name": "install",
+        "pattern": "\\b(install|ci|pod\\s+install|npm\\s+i|brew\\s+upgrade)\\b"
+      },
+      {
+        "name": "codegen",
+        "pattern": "\\b(codegen|generate|prebuild|compile)\\b"
+      }
+    ]
+  },
+  "description": {
+    "persistent": [
+      {
+        "name": "described as a server",
+        "pattern": "\\b(dev\\s+server|watcher|watch\\s+mode|preview\\s+server|tunnel|listener|keep\\s+running|serve[sr]?|serving)\\b"
+      }
+    ],
+    "finite": [
+      {
+        "name": "build",
+        "pattern": "\\b(build|builds|building|compile|bundle)\\b"
+      },
+      {
+        "name": "test",
+        "pattern": "\\b(test|tests|testing|e2e)\\b"
+      },
+      {
+        "name": "migration",
+        "pattern": "\\b(migrat\\w+)\\b"
+      },
+      {
+        "name": "deploy",
+        "pattern": "\\b(deploy\\w*|publish\\w*|upload\\w*)\\b"
+      },
+      {
+        "name": "lint",
+        "pattern": "\\b(lint\\w*|typecheck\\w*|type-check\\w*)\\b"
+      },
+      {
+        "name": "install",
+        "pattern": "\\b(install\\w*)\\b"
+      },
+      {
+        "name": "codegen",
+        "pattern": "\\b(generat\\w+|codegen)\\b"
+      }
+    ]
+  }
+}

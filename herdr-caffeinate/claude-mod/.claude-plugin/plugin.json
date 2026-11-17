@@ -1,0 +1,16 @@
+{
+  "name": "herdr-caffeinate",
+  "version": "0.1.0",
+  "description": "Tells the herdr-caffeinate plugin which background commands and subagents this session started, whether each is finite work or a persistent service, and when each finishes.",
+  "userConfig": {
+    "showStatus": {
+      "type": "boolean",
+      "title": "Show caffeinate status",
+      "description": "Pin the herdr-caffeinate state (for example '☕ Awake · 1 agent · 1 build') under the prompt.",
+      "default": false
+    }
+  },
+  "author": {
+    "name": "danielannan17"
+  }
+}
