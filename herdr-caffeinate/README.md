@@ -72,7 +72,7 @@ Holds one `caffeinate -i -w <daemon pid>` child while any herdr agent is `workin
 herdr plugin link /path/to/herdr-plugins/herdr-caffeinate
 ```
 
-To feed it Claude Code's background tasks as well, turn on the mod's `herdrRegistry` option. Without it, background tasks reach the daemon only through `herdr-caffeinate register`.
+To feed it Claude Code's background tasks as well, turn on the mod's `herdrRegistry` option. Without it, background tasks reach the daemon only through `herdr-caffeinate register`. The mod keeps its own hold either way, so with both running each holds its own assertion for the same task and the Mac can sleep once both let go; Off or Forced in the daemon changes only the daemon's hold, never the mod's.
 
 ### herdr config
 
