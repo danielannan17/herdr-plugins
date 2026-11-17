@@ -14,7 +14,9 @@ mod state;
 use std::io::Read;
 use std::time::Duration;
 
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{self, Event};
+use crossterm::execute;
 
 fn main() -> std::io::Result<()> {
     match std::env::args().nth(1).as_deref() {
@@ -58,6 +60,7 @@ fn main() -> std::io::Result<()> {
     let mut app = app::App::new();
     let result = run(&mut terminal, &mut app);
     app.finalize();
+    let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
     ratatui::restore();
     result
 }
@@ -65,8 +68,15 @@ fn main() -> std::io::Result<()> {
 /// Event loop with a short poll so the liveness heartbeat keeps stamping and
 /// the debounced autosave keeps flushing while idle.
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> std::io::Result<()> {
+    let mut bar_cursor = false;
     loop {
         terminal.draw(|frame| app.draw(frame))?;
+        // A thin bar while typing, so edit mode never reads as a block-cursor "normal mode".
+        if app.is_editing() != bar_cursor {
+            bar_cursor = app.is_editing();
+            let style = if bar_cursor { SetCursorStyle::SteadyBar } else { SetCursorStyle::DefaultUserShape };
+            execute!(std::io::stdout(), style)?;
+        }
         // Non-key events (resize, focus, …) simply fall through to a redraw.
         if event::poll(Duration::from_millis(500))?
             && let Event::Key(key) = event::read()?

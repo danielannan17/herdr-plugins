@@ -29,7 +29,7 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 const RELOAD_CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// Shown in preview when the note is empty; doubles as the quick-start help.
-const EMPTY_HELP: &str = "(empty note)\n\n  e or Enter        start writing\n  Esc               back to preview (saves)\n  Tab or 1/2        switch Workspace / Global note\n  Up/Dn PgUp/PgDn   scroll, g/G top/bottom\n  x                 clear the note (asks first)\n  q                 quit\n\nEverything autosaves and survives restarts.";
+const EMPTY_HELP: &str = "(empty note)\n\n  i or Enter        start writing\n  Esc               back to preview (saves)\n  Tab or 1/2        switch Workspace / Global note\n  Up/Dn PgUp/PgDn   scroll, g/G top/bottom\n  x                 clear the note (asks first)\n  q                 quit\n\nEverything autosaves and survives restarts.";
 
 pub struct App {
     tab: Tab,
@@ -38,7 +38,10 @@ pub struct App {
     lines: Vec<String>,
     row: usize,
     col: usize,
+    /// First visible wrapped row while editing.
     edit_scroll: usize,
+    /// Text width of the edit view from the last draw; Up/Down move by wrapped rows.
+    edit_width: usize,
     preview_scroll: usize,
     confirm_clear: bool,
     dirty: bool,
@@ -79,6 +82,7 @@ impl App {
             row: 0,
             col: 0,
             edit_scroll: 0,
+            edit_width: 80,
             preview_scroll: 0,
             confirm_clear: false,
             dirty: false,
@@ -220,7 +224,7 @@ impl App {
                 self.save();
                 return true;
             }
-            KeyCode::Char('e') | KeyCode::Enter => self.enter_edit(),
+            KeyCode::Char('i') | KeyCode::Enter => self.enter_edit(),
             KeyCode::Tab => self.switch_tab(match self.tab {
                 Tab::Workspace => Tab::Global,
                 Tab::Global => Tab::Workspace,
@@ -246,6 +250,11 @@ impl App {
         self.col = 0;
         self.edit_scroll = 0;
         self.note.mode = Mode::Edit;
+    }
+
+    /// True while the note is being edited, which is when the terminal cursor shows.
+    pub fn is_editing(&self) -> bool {
+        self.note.mode == Mode::Edit
     }
 
     fn leave_edit(&mut self) {
@@ -293,28 +302,12 @@ impl App {
                     self.col = 0;
                 }
             }
-            KeyCode::Up => {
-                if self.row > 0 {
-                    self.row -= 1;
-                    self.col = self.col.min(clen(&self.lines[self.row]));
-                }
-            }
-            KeyCode::Down => {
-                if self.row + 1 < self.lines.len() {
-                    self.row += 1;
-                    self.col = self.col.min(clen(&self.lines[self.row]));
-                }
-            }
+            KeyCode::Up => self.move_rows(-1),
+            KeyCode::Down => self.move_rows(1),
             KeyCode::Home => self.col = 0,
             KeyCode::End => self.col = line_len,
-            KeyCode::PageUp => {
-                self.row = self.row.saturating_sub(self.body_height.max(1));
-                self.col = self.col.min(clen(&self.lines[self.row]));
-            }
-            KeyCode::PageDown => {
-                self.row = (self.row + self.body_height.max(1)).min(self.lines.len() - 1);
-                self.col = self.col.min(clen(&self.lines[self.row]));
-            }
+            KeyCode::PageUp => self.move_rows(-(self.body_height.max(1) as isize)),
+            KeyCode::PageDown => self.move_rows(self.body_height.max(1) as isize),
             KeyCode::Enter => {
                 let at = byte_idx(&self.lines[self.row], self.col);
                 let rest = self.lines[self.row].split_off(at);
@@ -364,6 +357,37 @@ impl App {
         }
     }
 
+    /// Every wrapped row of the buffer as `(line, start, end)` char ranges.
+    fn wrapped_rows(&self) -> Vec<(usize, usize, usize)> {
+        let mut rows = Vec::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            for (start, end) in wrap_line(line, self.edit_width) {
+                rows.push((i, start, end));
+            }
+        }
+        rows
+    }
+
+    /// Index into `rows` of the wrapped row holding the cursor.
+    fn cursor_row(&self, rows: &[(usize, usize, usize)]) -> usize {
+        rows.iter()
+            .rposition(|&(line, start, _)| line == self.row && start <= self.col)
+            .unwrap_or(0)
+    }
+
+    /// Move the cursor `delta` wrapped rows, keeping its offset within the row.
+    fn move_rows(&mut self, delta: isize) {
+        let rows = self.wrapped_rows();
+        let current = self.cursor_row(&rows);
+        let offset = self.col - rows[current].1;
+        let target = current.saturating_add_signed(delta).min(rows.len() - 1);
+        let (line, start, end) = rows[target];
+        let last_of_line = rows.get(target + 1).is_none_or(|next| next.0 != line);
+        let limit = if last_of_line { end } else { end.saturating_sub(1).max(start) };
+        self.row = line;
+        self.col = (start + offset).min(limit);
+    }
+
     // ----- drawing -----------------------------------------------------
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -407,7 +431,7 @@ impl App {
 
         let hints = match self.note.mode {
             Mode::Preview => {
-                " e/Enter edit   Tab/1/2 switch   Up/Dn scroll   g/G top/end   x clear   q quit"
+                " i/Enter edit   Tab/1/2 switch   Up/Dn scroll   g/G top/end   x clear   q quit"
             }
             Mode::Edit => " Esc preview (saves, then Tab/1/2 switch)   Ctrl+S save",
         };
@@ -447,46 +471,71 @@ impl App {
 
     fn draw_edit(&mut self, frame: &mut Frame, area: Rect) {
         let h = usize::from(area.height).max(1);
-        // Rightmost column reserved for the overflow scrollbar.
-        let w = usize::from(area.width).saturating_sub(1).max(2);
-        if self.row < self.edit_scroll {
-            self.edit_scroll = self.row;
+        // One column for the overflow scrollbar and one so the cursor cell
+        // after a full row still fits.
+        self.edit_width = usize::from(area.width).saturating_sub(2).max(2);
+        let rows = self.wrapped_rows();
+        let cursor = self.cursor_row(&rows);
+        if cursor < self.edit_scroll {
+            self.edit_scroll = cursor;
         }
-        if self.row >= self.edit_scroll + h {
-            self.edit_scroll = self.row + 1 - h;
-        }
-        // Horizontal shift keeps the cursor visible on overlong lines. The
-        // shift is found in display COLUMNS (wide CJK/emoji chars count 2),
-        // otherwise the REVERSED cursor cell could sit past the pane edge.
-        let widths: Vec<usize> =
-            self.lines[self.row].chars().map(|c| c.width().unwrap_or(0)).collect();
-        let cursor_w = widths.get(self.col).copied().unwrap_or(1).max(1);
-        let mut h_off = 0;
-        let mut visible: usize = widths[..self.col].iter().sum();
-        while visible + cursor_w > w && h_off < self.col {
-            visible -= widths[h_off];
-            h_off += 1;
+        if cursor >= self.edit_scroll + h {
+            self.edit_scroll = cursor + 1 - h;
         }
         let mut lines: Vec<Line> = Vec::new();
-        for (i, line) in self.lines.iter().enumerate().skip(self.edit_scroll).take(h) {
-            let chars: Vec<char> = line.chars().skip(h_off).collect();
-            if i == self.row {
-                let col = self.col - h_off;
-                let before: String = chars.iter().take(col).collect();
-                let at: String = chars.get(col).map_or(" ".to_string(), |c| c.to_string());
-                let after: String = chars.iter().skip(col + 1).collect();
-                lines.push(Line::from(vec![
-                    Span::raw(before),
-                    Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)),
-                    Span::raw(after),
-                ]));
-            } else {
-                lines.push(Line::from(chars.into_iter().collect::<String>()));
-            }
+        for &(line, start, end) in rows.iter().skip(self.edit_scroll).take(h) {
+            lines.push(Line::from(self.lines[line].chars().skip(start).take(end - start).collect::<String>()));
         }
+        let (_, cursor_start, _) = rows[cursor];
+        let cursor_x: usize = self.lines[self.row]
+            .chars()
+            .skip(cursor_start)
+            .take(self.col - cursor_start)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        let x = area.x + u16::try_from(cursor_x).unwrap_or(u16::MAX).min(area.width.saturating_sub(1));
+        let y = area.y + u16::try_from(cursor - self.edit_scroll).unwrap_or(0);
+        frame.set_cursor_position((x, y));
         frame.render_widget(Paragraph::new(lines), area);
-        draw_scrollbar(frame, area, self.lines.len().saturating_sub(h), self.edit_scroll);
+        draw_scrollbar(frame, area, rows.len().saturating_sub(h), self.edit_scroll);
     }
+}
+
+/// Splits `line` into char ranges that each fit `width` display columns,
+/// breaking after the last space in a row when there is one. An empty line is
+/// one empty range.
+fn wrap_line(line: &str, width: usize) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let mut end = start;
+        let mut cols = 0;
+        let mut last_space = None;
+        while end < chars.len() {
+            let w = chars[end].width().unwrap_or(0);
+            if cols + w > width && end > start {
+                break;
+            }
+            cols += w;
+            if chars[end] == ' ' {
+                last_space = Some(end + 1);
+            }
+            end += 1;
+        }
+        if end < chars.len()
+            && let Some(space) = last_space.filter(|&space| space > start)
+        {
+            end = space;
+        }
+        rows.push((start, end));
+        start = end;
+    }
+    if rows.is_empty() {
+        rows.push((0, 0));
+    }
+    rows
 }
 
 /// Vertical scrollbar on the right edge; hidden when everything fits.
@@ -551,6 +600,46 @@ mod tests {
     }
 
     #[test]
+    fn wrap_line_breaks_after_the_last_space_that_fits() {
+        assert_eq!(wrap_line("", 10), vec![(0, 0)]);
+        assert_eq!(wrap_line("short", 10), vec![(0, 5)]);
+        assert_eq!(wrap_line("hello wonderful world", 12), vec![(0, 6), (6, 16), (16, 21)]);
+    }
+
+    #[test]
+    fn wrap_line_splits_a_word_longer_than_the_width() {
+        assert_eq!(wrap_line("abcdefghij", 4), vec![(0, 4), (4, 8), (8, 10)]);
+    }
+
+    #[test]
+    fn wrap_line_counts_wide_characters_as_two_columns() {
+        assert_eq!(wrap_line("日本語日本", 4), vec![(0, 2), (2, 4), (4, 5)]);
+    }
+
+    #[test]
+    fn up_and_down_move_between_wrapped_rows_of_one_line() {
+        let mut a = app("one two three four");
+        a.on_key(key(KeyCode::Enter));
+        a.edit_width = 8;
+        a.col = 2;
+        a.on_key(key(KeyCode::Down));
+        assert_eq!((a.row, a.col), (0, 10), "next wrapped row, same offset");
+        a.on_key(key(KeyCode::Up));
+        assert_eq!((a.row, a.col), (0, 2));
+    }
+
+    #[test]
+    fn down_from_a_wrapped_line_lands_on_the_next_line() {
+        let mut a = app("one two three four\nab");
+        a.on_key(key(KeyCode::Enter));
+        a.edit_width = 8;
+        a.col = 17;
+        a.on_key(key(KeyCode::Down));
+        assert_eq!(a.row, 1);
+        assert_eq!(a.col, 2, "clamped to the shorter line");
+    }
+
+    #[test]
     fn edit_roundtrip_insert_newline_backspace() {
         let mut a = app("ab");
         a.on_key(key(KeyCode::Enter)); // enter edit mode
@@ -563,7 +652,7 @@ mod tests {
         assert_eq!(a.note.mode, Mode::Preview);
         assert_eq!(a.note.text, "abc\nd");
 
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         a.on_key(key(KeyCode::Down));
         a.on_key(key(KeyCode::End));
         a.on_key(key(KeyCode::Backspace)); // delete 'd'
@@ -576,11 +665,11 @@ mod tests {
     fn esc_never_quits_and_q_quits_only_in_preview() {
         let mut a = app("x");
         assert!(!a.on_key(key(KeyCode::Esc)), "Esc in preview must not quit");
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         assert!(!a.on_key(key(KeyCode::Esc)), "Esc in edit leaves edit, not the app");
         assert_eq!(a.note.mode, Mode::Preview);
         // 'q' typed while editing is just a character.
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         assert!(!a.on_key(key(KeyCode::Char('q'))));
         a.on_key(key(KeyCode::Esc));
         assert_eq!(a.note.text, "qx");
@@ -620,7 +709,7 @@ mod tests {
     #[test]
     fn altgr_chars_insert_but_ctrl_shortcuts_do_not() {
         let mut a = app("");
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         // AltGr = CONTROL|ALT on Windows: a printable char, must insert.
         a.on_key(KeyEvent::new(
             KeyCode::Char('@'),
@@ -635,7 +724,7 @@ mod tests {
     #[test]
     fn debounced_autosave_commits_the_buffer() {
         let mut a = app("");
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         a.on_key(key(KeyCode::Char('z')));
         assert!(a.dirty);
         a.last_edit = Instant::now() - AUTOSAVE_AFTER;
@@ -685,7 +774,7 @@ mod tests {
     #[test]
     fn tab_keys_are_text_in_edit_mode() {
         let (mut a, dir) = stored_app("edit", "");
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         for code in [KeyCode::Tab, KeyCode::Char('1'), KeyCode::Char('2')] {
             a.on_key(key(code));
         }
@@ -759,7 +848,7 @@ mod tests {
         a.maybe_reload();
         assert_eq!(a.note.text, "theirs");
 
-        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Char('i')));
         a.on_key(key(KeyCode::Char('!')));
         external("later");
         due(&mut a);
@@ -768,6 +857,22 @@ mod tests {
         assert_eq!(a.note.text, "!theirs", "mid-edit changes are kept; autosave wins");
         assert_eq!(disk(&dir, Tab::Workspace).text, "!theirs");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_mode_wraps_long_lines_onto_following_rows() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut a = app("one two three four five six");
+        a.on_key(key(KeyCode::Enter));
+        let mut term = Terminal::new(TestBackend::new(14, 8)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        let row = |y: u16| -> String {
+            (0..14).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()
+        };
+        assert_eq!(row(1), "one two");
+        assert_eq!(row(2), "three four");
+        assert_eq!(row(3), "five six");
     }
 
     #[test]

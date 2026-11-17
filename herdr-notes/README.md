@@ -39,7 +39,7 @@ herdr plugin install alexarthurs/herdr-notes
 
 - **Rendered markdown** — headings, checkboxes, lists, quotes, code blocks
   and inline styles, drawn natively in the terminal with a scrollbar.
-- **Zero-friction editing** — `e` to type, `Esc` to go back. That's it.
+- **Zero-friction editing** — `i` to type, `Esc` to go back. That's it.
 - **A note per workspace, and a global one** — every herdr space keeps its
   own note, keyed to the workspace itself (renames don't lose it), and a
   second note is shared by all of them. A tab bar at the top switches
@@ -84,7 +84,7 @@ Preview (default):
 
 | Key | Action |
 | --- | --- |
-| `e` / `Enter` | edit the note |
+| `i` / `Enter` | edit the note |
 | `Tab` | switch between the Workspace and Global notes |
 | `1` / `2` | show the Workspace / Global note |
 | `Up` `Down` `PgUp` `PgDn` | scroll |
