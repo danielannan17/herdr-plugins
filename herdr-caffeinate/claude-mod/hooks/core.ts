@@ -28,6 +28,7 @@ export type Task = {
   label: string | null
   timeout: number | null
   snapshot_tracked: boolean
+  stuck_notified_at?: number
 }
 
 export function stateDir(env: { herdr?: string; xdg?: string; home?: string }): string {
@@ -192,4 +193,83 @@ export function parseForkAnswer(text: string): ForkAnswer | null {
   } catch {
     return null
   }
+}
+
+export type Policy = {
+  unknownGraceSec: number
+  unknownFallback: 'ignore' | 'keep'
+  stuckAfterSec: number
+  hardCapSec: number // 0: no cap
+  snapshotGraceSec: number
+}
+
+export const DEFAULT_POLICY: Policy = {
+  unknownGraceSec: 120,
+  unknownFallback: 'ignore',
+  stuckAfterSec: 6 * 3600,
+  hardCapSec: 0,
+  snapshotGraceSec: 5,
+}
+
+export type Verdict = { counts: boolean; reason: string; stuck: boolean }
+
+const BY: Record<string, string> = {
+  rule: 'by pattern rule',
+  agent: 'by its agent',
+  fork: 'by asking its agent',
+  cli: 'by CLI',
+  user: 'by you',
+}
+
+/** Whether a task keeps the Mac awake, and why. A user override beats everything. */
+export function verdict(task: Task, nowSec: number, policy: Policy): Verdict {
+  const age = Math.max(0, nowSec - task.started_at)
+  const by = BY[task.source] ?? task.source
+  let counts: boolean
+  let reason: string
+  let stuckOk = true
+  if (task.override === 'keep') {
+    ;[counts, reason, stuckOk] = [true, 'kept awake by your override', false]
+  } else if (task.override === 'ignore') {
+    ;[counts, reason] = [false, 'ignored by your override']
+  } else if (task.class === 'persistent') {
+    ;[counts, reason] = [false, `persistent service (${by})`]
+  } else if (task.class === 'finite') {
+    ;[counts, reason] = task.keep_awake
+      ? [true, `finite work (${by})`]
+      : [false, `finite, but its agent said it need not keep awake`]
+  } else if (age < policy.unknownGraceSec) {
+    ;[counts, reason] = [true, `unclassified, counted for ${Math.ceil(policy.unknownGraceSec - age)}s more`]
+  } else if (policy.unknownFallback === 'keep') {
+    ;[counts, reason] = [true, 'unclassified, fallback is keep awake']
+  } else {
+    ;[counts, reason] = [false, 'unclassified, fallback is ignore']
+  }
+  return { counts, reason, stuck: counts && stuckOk && age > policy.stuckAfterSec }
+}
+
+/** Past the optional hard cap, and not kept by the user. */
+export const overHardCap = (task: Task, nowSec: number, policy: Policy): boolean =>
+  policy.hardCapSec > 0 && task.override !== 'keep' && nowSec - task.started_at > policy.hardCapSec
+
+/** Absent from the session's latest in-flight list, and old enough that the list can be trusted. */
+export function missingFromSnapshot(task: Task, snapshotTs: number, ids: readonly string[], policy: Policy): boolean {
+  return (
+    task.snapshot_tracked &&
+    task.started_at + policy.snapshotGraceSec < snapshotTs &&
+    !ids.includes(task.task_id)
+  )
+}
+
+export function ageText(seconds: number): string {
+  if (seconds < 90) return `${Math.floor(seconds)}s`
+  if (seconds < 5400) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h${String(Math.floor((seconds % 3600) / 60)).padStart(2, '0')}m`
+}
+
+/** Tasks matching an id or a unique id prefix. */
+export const matchTasks = (tasks: Iterable<Task>, ref: string): Task[] => {
+  const all = [...tasks]
+  const exact = all.filter(t => t.task_id === ref)
+  return exact.length ? exact : all.filter(t => ref !== '' && t.task_id.startsWith(ref))
 }

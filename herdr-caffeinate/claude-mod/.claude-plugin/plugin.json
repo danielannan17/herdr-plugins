@@ -1,13 +1,41 @@
 {
   "name": "herdr-caffeinate",
-  "version": "0.1.0",
-  "description": "Tells the herdr-caffeinate plugin which background commands and subagents this session started, whether each is finite work or a persistent service, and when each finishes.",
+  "version": "0.2.0",
+  "description": "Keeps the Mac awake while this session has background commands or subagents that matter (builds, tests, deploys), not for dev servers; /awake shows and overrides.",
   "userConfig": {
     "showStatus": {
       "type": "boolean",
-      "title": "Show caffeinate status",
-      "description": "Pin the herdr-caffeinate state (for example '☕ Awake · 1 agent · 1 build') under the prompt.",
+      "title": "Show status line",
+      "description": "Pin '☕ awake · N background tasks' under the prompt while holding.",
       "default": false
+    },
+    "unknownFallback": {
+      "type": "string",
+      "title": "Unclassified commands",
+      "description": "What to do with a background command that could not be classified once its 120 s grace passes.",
+      "default": "ignore",
+      "options": [
+        "ignore",
+        "keep"
+      ]
+    },
+    "hardCapHours": {
+      "type": "number",
+      "title": "Hard cap (hours)",
+      "description": "Stop holding for a task after this many hours (0 = never; a long build is otherwise never dropped for age).",
+      "default": 0
+    },
+    "herdrRegistry": {
+      "type": "boolean",
+      "title": "Write the herdr-caffeinate registry",
+      "description": "Also record tasks where the herdr plugin's daemon reads them. Only needed if you run that plugin.",
+      "default": false
+    },
+    "stuckAfterHours": {
+      "type": "number",
+      "title": "Possibly stuck after (hours)",
+      "description": "A task holding the Mac awake this long raises a toast once; it keeps holding.",
+      "default": 6
     }
   },
   "author": {
